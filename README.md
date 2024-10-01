@@ -3,6 +3,14 @@
 ## Introduction
 
 This repository contains the implementation of our Equi-GSPR: Equivariant SE(3) Graph Network Model for Sparse Point Cloud Registration. Our model is designed to process and align 3D point cloud data from various datasets, including 3DMatch and KITTI.
+markdown
+
+## System Overview
+
+Below is an overview of our EGNN model architecture:
+
+![Model Overview](assets/model-overview.png)
+
 [Read the full paper here](https://eccv.ecva.net/virtual/2024/poster/944)
 
 ## Environment Setup

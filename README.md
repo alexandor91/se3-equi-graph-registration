@@ -16,7 +16,7 @@ Below is an overview of our EGNN model architecture:
 ## Environment Setup
 
 ## Environment Setup
-The code is tested on pyg (Pytorch-Geometric) **2.4.0**, **python 3.8**, **Pytorch 2.0.0**, **cuda11.8**, **GPU RAM** at least 8GB with batch size 1 on **GTX 2080** above.
+The code is tested on **pyg (Pytorch-Geometric)** **2.4.0**, **python 3.8**, **Pytorch 2.0.0**, **cuda11.8**, **GPU RAM** at least 8GB with batch size 1 on **GTX 2080** above.
 
 To set up the environment for this project, we use Conda. Follow these steps:
 

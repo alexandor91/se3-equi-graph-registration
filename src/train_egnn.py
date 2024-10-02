@@ -1,10 +1,11 @@
-
+# Copyright (c) Alexander.Kang alexander.kang@tum.de
+# Equi-GSPR: Equivariant Graph Model for Sparse Point Cloud Registration
+# Please cite the following papers if you use any part of the code.
 import torch
 from torch import nn, Tensor
-import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
 # from egnn_pytorch import EGNN
+# from se3_transformer_pytorch import SE3Transformer
 # import egcnModel
 from gcnLayer import GraphConvolution, GlobalPooling
 #from se3_transformer_pytorch.se3_transformer_pytorch import SE3Transformer
@@ -12,10 +13,8 @@ from gcnLayer import GraphConvolution, GlobalPooling
 #from se3_transformer_pytorch.utils import torch_default_dtype, fourier_encode
 import os, errno
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 import wandb
 import json
-import argparse
 #from sklearn.neighbors import NearestNeighbors
 #from datasets import TUMDataset
 
@@ -32,18 +31,6 @@ from torch_geometric.transforms import SamplePoints, KNNGraph
 import torch_geometric.transforms as T
 from torch_cluster import knn_graph
 from torch_scatter import scatter_add
-import sys
-import importlib.util
-
-# Get the path to the project root directory
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-
-# Add the project root to the Python path
-sys.path.insert(0, project_root)
-
-# Now you can import from datasets
-from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
-from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
 
 torch.cuda.manual_seed(2)
 
@@ -82,7 +69,7 @@ class PointNetLayer(MessagePassing):
 
 
 class PointNet(torch.nn.Module):
-    def __init__(self, in_num_feature=3, hidden_num_feature=32, output_num_feature=32, device='cuda:0'):
+    def __init__(self, in_num_feature=3, hidden_num_feature=32, output_num_feature=64, device='cuda:0'):
         super().__init__()
         self.hidden_num_feature = hidden_num_feature
         self.conv1 = PointNetLayer(in_num_feature, self.hidden_num_feature)
@@ -146,6 +133,7 @@ def compute_so3_matrix(x, graph_idx):
     epsilon = 1e-8
     threshold = 1e-6  # Threshold to detect near-zero values
     
+    print("@@@@@@@@@so(3)  matrix@@@@@@@@")
     idx_i = graph_idx[0]  # Source node indices
     idx_k = graph_idx[1]  # Target node indices
 
@@ -186,15 +174,13 @@ def compute_so3_matrix(x, graph_idx):
     # print(b_ik)
     # print(c_ik)
     # print(so3_matrix)
-    
     return so3_flat
 
 class E_GCL(nn.Module):
     """
-    E(n) Equivariant Convolutional Layer, basic moduel to buil up the eqnn network model
-    re
+    E(n) Equivariant Convolutional Layer, basic module to build up the EGNN network model.
+    Supports batched inputs.
     """
-
     def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, act_fn=nn.SiLU(), residual=True, attention=False, normalize=False, coords_agg='mean', tanh=False, device='cuda:0'):
         super(E_GCL, self).__init__()
         input_edge = input_nf * 2
@@ -205,11 +191,11 @@ class E_GCL(nn.Module):
         self.tanh = tanh
         self.epsilon = 1e-8
         edge_coords_nf = 1
-        self.device =device
+        self.device = device
 
         # Edge MLP, with 9 additional dimensions for SO(3) flattened feature
         self.edge_mlp = nn.Sequential(
-            nn.Linear(input_edge + edge_coords_nf + edges_in_d + 9, hidden_nf), ########2*input node feature, edge feature, edge attribute dimension features
+            nn.Linear(input_edge + edge_coords_nf + edges_in_d + 9, hidden_nf),
             act_fn,
             nn.Linear(hidden_nf, hidden_nf),
             act_fn)
@@ -234,16 +220,24 @@ class E_GCL(nn.Module):
             self.att_mlp = nn.Sequential(
                 nn.Linear(hidden_nf, edge_coords_nf),
                 nn.Sigmoid())
+        
         # Initialize SO(3) Tensor Product Layer
         self.so3_tensor_product = SO3TensorProductLayer(input_dim=3, output_dim=hidden_nf)
 
-    def edge_model(self, source, target, radial, edge_attr, coord, edge_index):
-        # Compute the SO(3) matrix features (N x 9)
+    def _batch_edges(self, edge_index, batch_size, num_nodes):
+        """
+        Batch edge indices by shifting the node indices per graph in batch.
+        """
+        batched_edges = []
+        for i in range(batch_size):
+            batched_edges.append(edge_index + i * num_nodes)
+        return torch.cat(batched_edges, dim=1)
+
+    def edge_model(self, source, target, radial, edge_attr, coord, edge_index, batch_size):
+        # Compute the SO(3) matrix features (batch_size * N x 9)
         so3_flat = compute_so3_matrix(coord, edge_index)
-        # so3_output = self.so3_tensor_product(so3_flat)    # Apply SO(3) tensor product layer
-
-
-        if edge_attr is None:  # Unused for edge attributes.
+        
+        if edge_attr is None:
             out = torch.cat([source, target, radial, so3_flat], dim=1)
         else:
             # Concatenate source, target, radial, edge_attr, and SO(3) flattened features
@@ -253,31 +247,26 @@ class E_GCL(nn.Module):
         if self.attention:
             att_val = self.att_mlp(out)
             out = out * att_val
-        # print(source.shape)
-        # print(target.shape)
-        # print(radial.shape)
-        # print(out.shape)
         return out
 
-    def node_model(self, x, edge_index, edge_attr, node_attr):
+    def node_model(self, h, edge_index, edge_attr, node_attr, batch_size):
         row, col = edge_index
-        agg = unsorted_segment_sum(edge_attr, row, num_segments=x.size(0))
+        agg = unsorted_segment_sum(edge_attr, row, num_segments=h.size(0))
         if node_attr is not None:
-            agg = torch.cat([x, agg, node_attr], dim=1)
+            agg = torch.cat([h, agg, node_attr], dim=1)
         else:
-            agg = torch.cat([x, agg], dim=1)
+            agg = torch.cat([h, agg], dim=1)
         out = self.node_mlp(agg)
         if self.residual:
-            out = x + out
+            out = h + out
         return out, agg
 
-    def coord_model(self, coord, edge_index, coord_diff, edge_feat):
-        # print("!!!!!!!!!!!!coord model!!!!!!!!!!!!")
+    def coord_model(self, coord, edge_index, coord_diff, edge_feat, batch_size):
         row, col = edge_index
         if edge_feat is not None:
             trans = coord_diff * self.coord_mlp(edge_feat)
         trans = coord_diff
-        # print(self.coord_mlp(edge_feat))
+
         if self.coords_agg == 'sum':
             agg = unsorted_segment_sum(trans, row, num_segments=coord.size(0))
         elif self.coords_agg == 'mean':
@@ -298,29 +287,37 @@ class E_GCL(nn.Module):
 
         return radial, coord_diff
 
-    def forward(self, h, edge_index, coord, edge_attr=None, node_attr=None):
-        self.to(self.device)
-        row, col = edge_index
-        radial, coord_diff = self.coord2radial(edge_index, coord)
+    def forward(self, h, edge_index, coord, edge_attr=None, node_attr=None, batch_size=1):
+        # Flatten batch dimension for h and coordinates
+        h = h.view(-1, h.size(-1))  # Flatten batch for node features
+        coord = coord.view(-1, coord.size(-1))  # Flatten batch for coordinates
+        num_nodes = h.size(0) // batch_size
 
+        # Batch edge indices by shifting node indices per graph
+        batched_edges = self._batch_edges(edge_index, batch_size, num_nodes)
+
+        # Compute radial and coordinate differences
+        radial, coord_diff = self.coord2radial(batched_edges, coord)
 
         # Edge model with SO(3) features concatenated
-        edge_feat = self.edge_model(h[row], h[col], radial, edge_attr, coord, edge_index)
-        # print("##########graph node feature###############")
-        # print(row.shape)
-        # print(h.shape)
-        # print(edge_index)
-        coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
-        h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
-        # print(coord.shape)
-        # print(h.shape)
+        edge_feat = self.edge_model(h[batched_edges[0]], h[batched_edges[1]], radial, edge_attr, coord, batched_edges, batch_size)
+        
+        # Update coordinates
+        coord = self.coord_model(coord, batched_edges, coord_diff, edge_feat, batch_size)
+        
+        # Update node features
+        h, agg = self.node_model(h, batched_edges, edge_feat, node_attr, batch_size)
+
+        # Reshape back to batch dimensions
+        h = h.view(batch_size, num_nodes, -1)
+        coord = coord.view(batch_size, num_nodes, -1)
+
         return h, coord, edge_attr
 
 
 class EGNN(nn.Module):
     def __init__(self, in_node_nf, hidden_nf, out_node_nf, in_edge_nf=0, device='cuda:0', act_fn=nn.SiLU(), n_layers=4, residual=True, attention=True, normalize=False, tanh=False):
         '''
-
         :param in_node_nf: Number of features for 'h' at the input
         :param hidden_nf: Number of hidden features
         :param out_node_nf: Number of features for 'h' at the output
@@ -330,14 +327,8 @@ class EGNN(nn.Module):
         :param n_layers: Number of layer for the EGNN
         :param residual: Use residual connections, we recommend not changing this one
         :param attention: Whether using attention or not
-        :param normalize: Normalizes the coordinates messages such that:
-                    instead of: x^{l+1}_i = x^{l}_i + Σ(x_i - x_j)phi_x(m_ij)
-                    we get:     x^{l+1}_i = x^{l}_i + Σ(x_i - x_j)phi_x(m_ij)/||x_i - x_j||
-                    We noticed it may help in the stability or generalization in some future works.
-                    We didn't use it in our paper.
-        :param tanh: Sets a tanh activation function at the output of phi_x(m_ij). I.e. it bounds the output of
-                        phi_x(m_ij) which definitely improves in stability but it may decrease in accuracy.
-                        We didn't use it in our paper.
+        :param normalize: Normalizes the coordinates messages
+        :param tanh: Whether to apply a tanh activation to the coordinate update
         '''
 
         super(EGNN, self).__init__()
@@ -346,19 +337,39 @@ class EGNN(nn.Module):
         self.n_layers = n_layers
         self.embedding_in = nn.Linear(in_node_nf, self.hidden_nf)
         self.embedding_out = nn.Linear(self.hidden_nf, out_node_nf)
-        for i in range(0, n_layers):
-            self.add_module("gcl_%d" % i, E_GCL(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf,
-                                                act_fn=act_fn, residual=residual, attention=attention,
-                                                normalize=normalize, tanh=tanh))
+        for i in range(n_layers):
+            self.add_module(f"gcl_{i}", E_GCL(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=in_edge_nf,
+                                              act_fn=act_fn, residual=residual, attention=attention,
+                                              normalize=normalize, tanh=tanh))
 
-    def forward(self, h, x, edges, edge_attr):
-        # self.to(self.device)
-        h = self.embedding_in(h)
-        for i in range(0, self.n_layers):
-            h, x, _ = self._modules["gcl_%d" % i](h, edges, x, edge_attr=edge_attr)
+    def forward(self, h, x, edges, edge_attr, batch_size):
+        """
+        h: Node features tensor of shape [batch_size, num_nodes, node_features]
+        x: Node coordinates tensor of shape [batch_size, num_nodes, 3]
+        edges: Edge index tensor of shape [2, num_edges] (for each graph)
+        edge_attr: Edge attributes tensor of shape [batch_size * num_edges, edge_features]
+        """
+        batch_size, num_nodes, _ = h.size()
+        h = self.embedding_in(h.view(-1, h.size(-1)))  # Flatten batch for embedding
+        x = x.view(-1, 3)  # Flatten batch for coordinates
+
+        # Batch edge indices by shifting node indices per graph in batch
+        batched_edges = self._batch_edges(edges, batch_size, num_nodes)
+
+        for i in range(self.n_layers):
+            h, x, _ = self._modules[f"gcl_{i}"](h, batched_edges, x, edge_attr=edge_attr)
+
         h = self.embedding_out(h)
-        return h, x
+        return h.view(batch_size, num_nodes, -1), x.view(batch_size, num_nodes, 3)
 
+    def _batch_edges(self, edges, batch_size, num_nodes):
+        """
+        Shift the node indices in `edges` for each graph in the batch to handle multiple graphs in the batch.
+        """
+        edges_shifted = []
+        for i in range(batch_size):
+            edges_shifted.append(edges + i * num_nodes)
+        return torch.cat(edges_shifted, dim=1)
 
 def unsorted_segment_sum(data, segment_ids, num_segments):
     result_shape = (num_segments, data.size(1))
@@ -376,7 +387,6 @@ def unsorted_segment_mean(data, segment_ids, num_segments):
     result.scatter_add_(0, segment_ids, data)
     count.scatter_add_(0, segment_ids, torch.ones_like(data))
     return result / count.clamp(min=1)
-
 
 def get_edges(n_nodes):
     rows, cols = [], []
@@ -403,14 +413,16 @@ def get_edges_batch(graph_idx, n_nodes, batch_size):
     """
     # Get the edges (source and target indices) from graph_idx
     edges = get_edges_from_idx(graph_idx)
+    
     # Create edge attributes (dummy values set to 1)
     edge_attr = torch.ones(len(edges[0]) * batch_size, 1).cuda()
     
     # Assuming the edges are already on the GPU, remove the redundant torch.LongTensor conversion
-    edges_concat = [edges[0], edges[1]]  # These should already be CUDA tensors
+    edges = [edges[0], edges[1]]  # These should already be CUDA tensors
+    
     # Handle batch size
     if batch_size == 1:
-        return edges_concat, edge_attr
+        return edges, edge_attr
     elif batch_size > 1:
         rows, cols = [], []
         for i in range(batch_size):
@@ -419,109 +431,9 @@ def get_edges_batch(graph_idx, n_nodes, batch_size):
             cols.append(edges[1] + n_nodes * i)
         
         # Concatenate rows and columns across batches (no need to re-cast to LongTensor or move to GPU)
-        edges_concat = [torch.cat(rows), torch.cat(cols)]    
-    return edges_concat, edge_attr
-
-class CrossAttentionPoseRegression(nn.Module):
-    def __init__(self, egnn: EGNN, num_nodes: int = 2048, hidden_nf: int = 35, device='cuda:0'):
-        super(CrossAttentionPoseRegression, self).__init__()
-        self.egnn = egnn  # The shared EGNN network
-        self.hidden_nf = hidden_nf  # Hidden feature dimension (35)
-        self.num_nodes = num_nodes
-        self.device = device  # Device (CPU or GPU)
-
-        # MLP layers to compress the input from 2048 points to 128 points
-        self.mlp_compress = nn.Sequential(
-            nn.Linear(num_nodes, num_nodes//4),  # Compress to 128 points
-            nn.ReLU(),
-            nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
-        )
-
-        # MLP for pose regression (quaternion + translation)
-        self.mlp_pose = nn.Sequential(
-            nn.Linear(128 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
-            nn.ReLU(),
-            nn.Linear(256, 128),  # Intermediate layer
-            nn.ReLU(),
-            nn.Linear(128, 64),  # Intermediate layer
-            nn.ReLU(),
-            nn.Linear(64, 7)  # Output quaternion (4) + translation (3)
-        )
-
-    def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt):
-        # Move everything to the same device (GPU/CPU)
-        h_src = h_src.to(self.device)
-        x_src = x_src.to(self.device)
-
-        # Ensure edge indices are tensors and move them to the correct device
-        if isinstance(edges_src, list):
-            edges_src = [edge.to(self.device) for edge in edges_src]
-        else:
-            edges_src = edges_src.to(self.device)
-
-        if edge_attr_src is not None:
-            edge_attr_src = edge_attr_src.to(self.device)
-
-        h_tgt = h_tgt.to(self.device)
-        x_tgt = x_tgt.to(self.device)
-
-        # Ensure edge indices for the target are tensors and move them to the correct device
-        if isinstance(edges_tgt, list):
-            edges_tgt = [edge.to(self.device) for edge in edges_tgt]
-        else:
-            edges_tgt = edges_tgt.to(self.device)
-
-        if edge_attr_tgt is not None:
-            edge_attr_tgt = edge_attr_tgt.to(self.device)
-
-        # print(h_src.shape)
-        # print(x_src.shape)
-        # print(edges_src)
-        # print(edge_attr_src.shape)
-        print("##########egnn starts!!!!!!#########")
-        print(h_src.shape)
-        print(x_src.shape)
-        print(edges_src[0].shape)
-        print(edge_attr_src.shape)
-        print(h_tgt.shape)
-        print(x_tgt.shape)
-        print(edges_tgt[0].shape)
-        print(edge_attr_tgt.shape)        
-        # Process source and target point clouds with the EGNN
-        h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
-        h_tgt, x_tgt = self.egnn(h_src, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
-        print("##########egnn ends!!!!!!#########")
-
-        # Concatenate node features with coordinates
-        h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
-        h_tgt = torch.cat([h_tgt, x_tgt], dim=-1)  # Shape: [2048, 35]
-
-        # Compress the features along the first dimension (2048 -> 128)
-        compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)  # Shape: [128, 35]
-        compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)  # Shape: [128, 35]
-
-        # Compute the similarity matrix (dot product) between source and target compressed features
-        sim_matrix = torch.mm(compressed_h_src, compressed_h_tgt.t())  # Shape: [128, 128]
-
-        # Weigh the source and target descriptors using the similarity matrix
-        weighted_h_src = torch.mm(sim_matrix, compressed_h_src)  # Shape: [128, 35]
-        weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
-
-        # Concatenate the source and target weighted features
-        combined_features = torch.cat([weighted_h_src, weighted_h_tgt], dim=-1)  # Shape: [128, 70]
-
-        # Flatten the combined features for pose regression
-        combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
-
-        # Regress the pose (quaternion + translation)
-        pose = self.mlp_pose(combined_features_flat)  # Shape: [7]
-
-        # The pose consists of a quaternion (4D) and a translation (3D)
-        quaternion = pose[:4]  # Shape: [4]
-        translation = pose[4:]  # Shape: [3]
-        print("########## Regression Ends!!!!!!#########")
-        return quaternion, translation
+        edges = [torch.cat(rows), torch.cat(cols)]
     
+    return edges, edge_attr
 # def get_edges_batch(n_nodes, batch_size):
 #     edges = get_edges(n_nodes)
 #     edge_attr = torch.ones(len(edges[0]) * batch_size, 1).cuda()
@@ -535,366 +447,56 @@ class CrossAttentionPoseRegression(nn.Module):
 #             cols.append(edges[1] + n_nodes * i)
 #         edges = [torch.cat(rows).cuda(), torch.cat(cols).cuda()]
 #     return edges, edge_attr
-# Define the loss function for pose regression (combining quaternion and translation loss)
-def rotation_matrix_to_quaternion(rotation_matrix):
-    """
-    Convert a 3x3 rotation matrix to a quaternion (no batch size).
-    Args:
-        rotation_matrix (Tensor): Rotation matrix of shape [3x3].
-    Returns:
-        Tensor: Quaternion tensor [4].
-    """
-    quaternion = torch.zeros(4, device=rotation_matrix.device)
-    
-    m = rotation_matrix
-    t = m[0, 0] + m[1, 1] + m[2, 2]
-    
-    if t > 0:
-        s = torch.sqrt(1.0 + t) * 2
-        quaternion[0] = 0.25 * s
-        quaternion[1] = (m[2, 1] - m[1, 2]) / s
-        quaternion[2] = (m[0, 2] - m[2, 0]) / s
-        quaternion[3] = (m[1, 0] - m[0, 1]) / s
-    elif (m[0, 0] > m[1, 1]) and (m[0, 0] > m[2, 2]):
-        s = torch.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2
-        quaternion[0] = (m[2, 1] - m[1, 2]) / s
-        quaternion[1] = 0.25 * s
-        quaternion[2] = (m[0, 1] + m[1, 0]) / s
-        quaternion[3] = (m[0, 2] + m[2, 0]) / s
-    elif m[1, 1] > m[2, 2]:
-        s = torch.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2
-        quaternion[0] = (m[0, 2] - m[2, 0]) / s
-        quaternion[1] = (m[0, 1] + m[1, 0]) / s
-        quaternion[2] = 0.25 * s
-        quaternion[3] = (m[1, 2] + m[2, 1]) / s
-    else:
-        s = torch.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2
-        quaternion[0] = (m[1, 0] - m[0, 1]) / s
-        quaternion[1] = (m[0, 2] + m[2, 0]) / s
-        quaternion[2] = (m[1, 2] + m[2, 1]) / s
-        quaternion[3] = 0.25 * s
 
-    return quaternion
-
-def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.0):
-    """
-    Compute the loss between the predicted pose (quaternion + translation) and the ground truth pose matrix.
-    
-    Arguments:
-    - pred_quaternion: Predicted quaternion of shape [4]
-    - pred_translation: Predicted translation of shape [3]
-    - gt_pose: Ground truth pose as a 4x4 matrix (rotation matrix + translation)
-    
-    Returns:
-    - Total loss combining quaternion and translation loss.
-    """
-    
-    # Extract ground truth translation (3D) and rotation (3x3) from the 4x4 gt_pose matrix
-    gt_translation = gt_pose[:3, 3]    # Translation vector [3]
-    gt_rotation = gt_pose[:3, :3]      # Rotation matrix [3x3]
-
-    # Convert ground truth rotation matrix to quaternion
-    gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [3x3] to [4]
-    gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)
-    # Normalize the predicted quaternion
-    pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)
-
-    # Huber loss for quaternion and translation
-    huber_loss = nn.HuberLoss(delta=delta)
-
-    quaternion_loss = huber_loss(pred_quaternion, gt_quaternion)
-    translation_loss = huber_loss(pred_translation, gt_translation)
-
-    # Return the combined loss
-    return quaternion_loss + translation_loss
-
-
-# Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, use_pointnet=False, log_interval=10):
-    model.train()
-    running_loss = 0.0
-
-    for batch_idx, (corr, labels, src_pts, tar_pts, gt_pose, src_features, tgt_features) in enumerate(dataloader):
-        # Check if any returned data is None, and skip if so
-        if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-            print(f"Skipping batch {batch_idx} due to missing data.")
-            continue  # Skip this batch
-        
-        # Move the data to the specified device (GPU/CPU)
-        xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-        feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
-        gt_pose = gt_pose.to(device)
-        # Initialize KNN graphs for source and target point clouds
-        k = 12
-        ####### remove the batch size when it is one ##############
-        # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-        if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-            xyz_0 = xyz_0.squeeze(0)
-        if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-            xyz_1 = xyz_1.squeeze(0)
-        if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-            gt_pose = gt_pose.squeeze(0)
-        if corr.dim() == 3 and corr.size(0) == 1:
-            corr = corr.squeeze(0)
-        if labels.dim() == 3 and labels.size(0) == 1:
-            labels = labels.squeeze(0)
-
-        graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-        graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
-
-        # Descriptor generation using PointNet or directly using feat_0/feat_1
-        if use_pointnet:
-            feature_encoder = PointNet().to(device)
-            feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        else:
-            feats_0 = feat_0  # Use pre-computed features directly
-            feats_1 = feat_1  # Use pre-computed features directly
-
-        if feats_0.dim() == 3 and feats_0.size(0) == 1:
-            feats_0 = feats_0.squeeze(0)
-        if feats_1.dim() == 3 and feats_1.size(0) == 1:
-            feats_1 = feats_1.squeeze(0)
-
-        feature_encoder = PointNet().to(device)
-        # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-        # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        # Initialize edges and edge attributes for source and target
-        edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-        edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
-
-        print("######!!!!!starting input #########")
-
-        print(xyz_0.shape)
-        print(feats_0.shape)
-        print(edges_0[0].shape)
-        # Zero the gradients
-        optimizer.zero_grad()
-
-        # Forward pass through the model
-        quaternion, translation = model(feats_0, xyz_0, edges_0, edge_attr_0, feats_1, xyz_1, edges_1, edge_attr_1)
-
-        # Compute the loss (L2 loss for quaternion and translation)
-        loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
-
-        # Backward pass and optimization step
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        # Print loss for every log_interval batches
-        if (batch_idx+1) % log_interval == 0:
-            print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.4f}')
-
-    return running_loss / len(dataloader)
- 
-# Function to validate the model on the validation set
-def validate(model, dataloader, device, use_pointnet=False):
-    model.eval()
-    running_loss = 0.0
-    with torch.no_grad():
-        for batch_idx, (corr, labels, src_pts, tar_pts, gt_pose, src_features, tgt_features) in enumerate(dataloader):
-            # Move the data to the specified device (GPU/CPU)
-            xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-            feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
-            gt_pose = gt_pose.to(device)
-
-            ####### remove the batch size when it is one ##############
-            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-                xyz_0 = xyz_0.squeeze(0)
-            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-                xyz_1 = xyz_1.squeeze(0)
-            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-                gt_pose = gt_pose.squeeze(0)
-            if corr.dim() == 3 and corr.size(0) == 1:
-                corr = corr.squeeze(0)
-            if labels.dim() == 3 and labels.size(0) == 1:
-                labels = labels.squeeze(0)
-
-            # Initialize KNN graphs for source and target point clouds
-            k = 12
-            
-            graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-            graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
-            # Descriptor generation using PointNet or directly using feat_0/feat_1
-            if use_pointnet:
-                feature_encoder = PointNet().to(device)
-                feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-                feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            else:
-                feats_0 = feat_0  # Use pre-computed features directly
-                feats_1 = feat_1  # Use pre-computed features directly
-
-            if feats_0.dim() == 3 and feats_0.size(0) == 1:
-                feats_0 = feats_0.squeeze(0)
-            if feats_1.dim() == 3 and feats_1.size(0) == 1:
-                feats_1 = feats_1.squeeze(0)
-
-            # Initialize edges and edge attributes for source and target
-            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
-
-            # Forward pass through the model
-            quaternion, translation = model(feats_0, xyz_0, edges_0, edge_attr_0, feats_1, xyz_1, edges_1, edge_attr_1)
-
-            # Compute the loss
-            loss = pose_loss(quaternion, translation, gt_pose)
-
-            running_loss += loss.item()
-
-    # Return average loss for validation
-    return running_loss / len(val_loader)
-
-# Save the checkpoint
-def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_path="model_checkpoint.pth"):
-    """
-    Saves the model checkpoint, including PointNet encoder, EGNN layers, CrossAttentionPoseRegression, and optimizer state.
-
-    Args:
-        epoch (int): The current epoch number.
-        pointnet (torch.nn.Module): The PointNet encoder model.
-        egnn (torch.nn.Module): The EGNN layers model.
-        cross_attention (torch.nn.Module): The CrossAttentionPoseRegression model.
-        optimizer (torch.optim.Optimizer): The optimizer used in training.
-        save_path (str): Path to save the checkpoint.
-    """
-    checkpoint = {
-        'epoch': epoch,
-        'pointnet_state_dict': pointnet.state_dict(),
-        'egnn_state_dict': egnn.state_dict(),
-        'cross_attention_state_dict': cross_attention.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-    }
-    torch.save(checkpoint, save_path)
-    print(f"Checkpoint saved at epoch {epoch}")
-
-# Load the checkpoint
-def load_checkpoint(checkpoint_path, pointnet, egnn, cross_attention, optimizer=None):
-    """
-    Loads the model checkpoint.
-
-    Args:
-        checkpoint_path (str): Path to the saved checkpoint.
-        pointnet (torch.nn.Module): The PointNet encoder model.
-        egnn (torch.nn.Module): The EGNN layers model.
-        cross_attention (torch.nn.Module): The CrossAttentionPoseRegression model.
-        optimizer (torch.optim.Optimizer, optional): The optimizer used in training. Default is None.
-
-    Returns:
-        int: The epoch number at which training was saved.
-    """
-    checkpoint = torch.load(checkpoint_path)
-    pointnet.load_state_dict(checkpoint['pointnet_state_dict'])
-    egnn.load_state_dict(checkpoint['egnn_state_dict'])
-    cross_attention.load_state_dict(checkpoint['cross_attention_state_dict'])
-    
-    if optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    
-    print(f"Checkpoint loaded from epoch {checkpoint['epoch']}")
-    
-    return checkpoint['epoch']
-
-
-# Main training loop
-def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device, use_pointnet=False, log_interval = 10,  save_path="model_checkpoint.pth"):
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    for epoch in range(num_epochs):
-        # Train for one epoch
-        print(f'\nEpoch {epoch+1}/{num_epochs}')
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, use_pointnet, log_interval)
-
-        # Validate every few epochs (e.g., every N epochs)
-        if (epoch + 1) % 5 == 0:
-            val_loss = validate(model, val_loader, device, use_pointnet)
-            print(f'Epoch {epoch}/{num_epochs} - Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
-        else:
-            print(f'Epoch {epoch}/{num_epochs} - Training Loss: {train_loss:.4f}')
-
-
-def get_args():
-    parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
-    
-    # Add arguments with default values
-    parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=0.0002, help='Learning rate for the optimizer')
-    parser.add_argument('--num_epochs', type=int, default=100, help='Number of epochs for training')
-    parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
-    parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
-    parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
-    parser.add_argument('--hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
-    parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
-    parser.add_argument('--n_layers', type=int, default=4, help='Number of layers in EGNN')
-    parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
-    parser.add_argument('--savepath', type=str, default='./checkpoints/model_checkpoint.pth', help='Path to the dataset')
-
-    return parser.parse_args()
 
 if __name__ == "__main__":
-    args = get_args()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # print("###edge batch begins 2###########")
-    # # Set up the data and training parameters
-    # Load the arguments
-    base_dir = args.base_dir
-    batch_size = args.batch_size
-    learning_rate = args.learning_rate
-    num_epochs = args.num_epochs
-    num_node = args.num_node
-    k = args.k
+    pos = torch.rand(2048, 3).to(dev)
+    edge = torch.randint(1, 10, (2, 768)).to(dev)
+    batch = torch.tensor([1]).to(dev)
 
-    in_node_nf = args.in_node_nf
-    hidden_nf = args.hidden_nf
-    out_node_nf = args.out_node_nf
-    n_layers = args.n_layers
-    mode = args.mode
-    savepath = args.savepath
+#   dataset.transform = T.Compose([SamplePoints(num=256), KNNGraph(k=6)])
 
-    mode = "train"
-    train_dataset = ThreeDMatchTrainVal(root=base_dir, 
-                            split=mode,   
-                            descriptor='fcgf',
-                            in_dim=6,
-                            inlier_threshold=0.10,
-                            num_node=2048, 
-                            use_mutual=True,
-                            downsample=0.03, 
-                            augment_axis=1, 
-                            augment_rotation=1.0,
-                            augment_translation=0.01,
-                        )
+#   data = dataset[0]
+#   y = [1, 3]
+#   Data(pos, edge_index=[2, 1536], y)
+    k = 12  ######knn nearest neighbouring for grpah initialization
+    graph_idx = knn_graph(pos,k,loop=False)
+    index = torch.LongTensor([1, 0])
+    new_graph_idx = torch.zeros_like(graph_idx)
+    new_graph_idx[index] = graph_idx
+    ks_graph_coords = pos[new_graph_idx]
+    # edgegraph = KNNGraph(k=12) #RadiusGraph(r=0.05, loop = False, max_num_neighbors = 15, num_workers = 6)
+    print("###graph init begins###########")
+    print(index.shape)       ##########orch.Size([2])
+    print(graph_idx.shape)   #######torch.Size([2, 24576])
+    print(pos.shape)     ##########torch.Size([2048, 3])
+    print(ks_graph_coords.shape) ######torch.Size([2048, 64])
+    # print(pos) 
+    # print(new_graph_idx)
+    # print(ks_graph)
+    feature_encoder = PointNet().to(dev)
+    feats = feature_encoder(pos, edge, batch).to(dev)
 
-    val_dataset = ThreeDMatchTrainVal(root=base_dir, 
-                            split='val',   
-                            descriptor='fcgf',
-                            in_dim=6,
-                            inlier_threshold=0.10,
-                            num_node=2048, 
-                            use_mutual=True,
-                            downsample=0.03, 
-                            augment_axis=1, 
-                            augment_rotation=1.0,
-                            augment_translation=0.01,
-                        )
-    # Instantiate the dataset
+    print(feats.shape)    ##############torch.Size([2048, 64])
+    # Dummy parameters
+    n_nodes = torch.tensor([pos.shape[0]]).to(dev)
+    n_feat =  torch.tensor([feats.shape[1]]).to(dev)
+    x_dim = torch.tensor([pos.shape[1]]).to(dev)
 
-    # # Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    # Dummy variables h, x and fully connected edges
+    h = torch.ones(batch * n_nodes, n_feat).to(dev)
+    x = torch.ones(batch * n_nodes, x_dim).to(dev)
+    edges, edge_attr = get_edges_batch(graph_idx, n_nodes, batch)
 
-    egnn = EGNN(in_node_nf=in_node_nf, hidden_nf=hidden_nf, out_node_nf=out_node_nf, in_edge_nf=1, n_layers=n_layers)
-    egnn.to(dev)
-    # egnn(h, x, edges1, edge_attr1)
-    # print("###edge batch ends###########")
-    cross_attention_model = CrossAttentionPoseRegression(egnn=egnn, num_nodes=num_node, hidden_nf=hidden_nf, device=dev).to(dev)
-    cross_attention_model.to(dev)
+    # Initialize EGNN
+    egnn = EGNN(in_node_nf=n_feat, hidden_nf=32, out_node_nf=1, in_edge_nf=1).cuda()
 
-    # cross_attention_model(h, x, graph_idx1, edge_attr1, h, x, graph_idx1, edge_attr1)
-
-    train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
-                learning_rate=learning_rate, device=dev, use_pointnet=True, log_interval=10, save_path=savepath)
+    print(x.shape)
+    print(h.shape)
+    print(n_nodes)
+    print(x_dim)
+    print(batch)
+    print(edges[0].shape)
+    # Run EGNN
+    h, x = egnn(h, x, edges, edge_attr)

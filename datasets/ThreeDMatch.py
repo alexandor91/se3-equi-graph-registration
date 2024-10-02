@@ -224,8 +224,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         # src_id, tgt_id = self.files[index][0], self.files[index][1]
         # if random.random() > 0.5:
         #     src_id, tgt_id = tgt_id, src_id
-        print("########   index    #####")
-        print(index)
         file_name = self.file_list[index]
 
         # Load the .pkl file
@@ -244,7 +242,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         #     tar_pts = torch.tensor(tar_pts, dtype=torch.float32)
         self.length = self.length + 1
         # if self.length == 2:
-        # print(gt_trans)
         # time.sleep(5)  # Pause execution for 2 seconds
 
         src_features = data.get('feat_0')
@@ -261,11 +258,6 @@ class ThreeDMatchTrainVal(data.Dataset):
 
         N_src = src_features.shape[0]
         N_tgt = tgt_features.shape[0]
-        # print("$$$$$$$$&&&&&&&&&&&&&$$$$$$$$$$")
-        # print(N_src)
-        # print(N_tgt)
-        # print(self.num_node)
-        print(gt_trans)
 
         sensor_origin = np.array([0, 0, 0])
         # Order the points by the ray length to the sensor origin for training convenience
@@ -276,7 +268,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         data["xyz_0"] = xyz0[sorted_indices0]
         data["feat_0"] = feat0[sorted_indices0]
         # print("$$$$$$$$$ ordered src points $$$$$$$$")
-        # print(np.linalg.norm(data["xyz_0"] - sensor_origin, axis=1))
         # Order the points by the ray length to the sensor origin for training convenience
         xyz1 = data["xyz_1"]
         feat1 = data["feat_1"]
@@ -323,13 +314,10 @@ class ThreeDMatchTrainVal(data.Dataset):
         corr = corr[sel_ind, :]            
         labels = labels[sel_ind]
         src_desc = src_features[corr[:, 0], :]
-        tgt_desc = tgt_features[corr[:,1], :]
+        tgt_desc = tgt_features[corr[:, 1], :]
         input_src_keypts = src_pts[corr[:, 0], :]
         input_tgt_keypts = tar_pts[corr[:, 1], :]
 
-        print("##########  @@@@@@@@@@@    ##########")
-        print(input_src_keypts.shape)
-        print(input_tgt_keypts.shape)
         if self.normalize_use:
             input_tgt_keypts = transform_target_to_source_frame(input_src_keypts, input_tgt_keypts)
             centroid = np.mean(input_src_keypts, axis=0)
@@ -430,20 +418,23 @@ class ThreeDMatchTest(data.Dataset):
         # Load the .pkl file
         with open(os.path.join(self.root, 'test_3dmatch', file_name), 'rb') as f:
             data = pickle.load(f)
-        print(data)
         # Extract the necessary parts of the data
         self.src_filename = data.get('file_0')
         self.tgt_filename = data.get('file_1')
         src_pts = data.get('xyz_0')  # numpy array, for instance
         tar_pts = data.get('xyz_1')  # string or other type
         gt_trans = data.get('pose_gt')   ## camera to world pose
+        # Check if the number of points in src_pts or tar_pts is less than 2048
+        if src_pts.shape[0] < self.num_node or tar_pts.shape[0] < self.num_node:
+            print(f"Skipping index {index}: insufficient number of points (src_pts: {src_pts.shape[0]}, tar_pts: {tar_pts.shape[0]})")
+            return None  #
         # Convert the numpy array to a torch tensor, if needed
         # if isinstance(src_pts, np.ndarray) and isinstance(tar_pts, np.ndarray):
         #     src_pts = torch.tensor(src_pts, dtype=torch.float32)
         #     tar_pts = torch.tensor(tar_pts, dtype=torch.float32
         src_features = data.get('feat_0')
         tgt_features = data.get('feat_1')
-        print(gt_trans)
+
         # Normalizing for fpfh
         if self.descriptor == 'fpfh':
             src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
@@ -456,10 +447,6 @@ class ThreeDMatchTest(data.Dataset):
 
         N_src = src_features.shape[0]
         N_tgt = tgt_features.shape[0]
-        print("$$$$$$$$$$$$$$$$$$")
-        print(N_src)
-        print(N_tgt)
-        print(self.num_node)
 
         sensor_origin = np.array([0, 0, 0])
         # Order the points by the ray length to the sensor origin for training convenience
@@ -595,3 +582,4 @@ if __name__ == "__main__":
         print(len(dset))  
         for i in range(dset.__len__()):
             ret_dict = dset[i]
+

@@ -13,10 +13,10 @@ Below is an overview of our EGNN model architecture:
 
 [Read the full paper here](https://eccv.ecva.net/virtual/2024/poster/944)
 
-## Environment Setup
 
 ## Environment Setup
 The code is tested on **pyg (Pytorch-Geometric)** **2.4.0**, **python 3.8**, **Pytorch 2.0.0**, **cuda11.8**, **GPU RAM** at least 8GB with batch size 1 on **GTX 2080** above.
+Noted, my current code implementation with batch size one only consumes less than **0.5GB** RAM on GPU!!! and the batch size by default is set to one, other than one  may result in some training error, I will fix the batch size bug soon, please stay tuned, and batch size one can be enough for the current training as data size is not that big. The code can be ported onto edge device easily to support mobile applications.
 
 To set up the environment for this project, we use Conda. Follow these steps:
 
@@ -29,17 +29,23 @@ $conda activate egnn-test
 
 ## Data
 
-To run this project, you'll need to download the following datasets:
+To run this project, you'll need to download the following pre-processed datasets in our self-defined format:
 
 - [3DMatch](https://drive.google.com/file/d/1wr21qFPvgoDWsBnMafew7h-vZfP242Gw/view?usp=drive_link)
 - [KITTI](https://drive.google.com/file/d/17u2AWfPIMbgCQUVtXYelgacv_Cyeh6EM/view?usp=sharing)
 
 ## Data Processing
 
-For self-processing of data, we provide scripts in the `datasets` folder:
+For the two dataloaders of datasets, we provide dataloader scripts in the `datasets` folder:
 
 - `3DMatch.py`: For processing 3DMatch dataset
 - `KITTI.py`: For processing KITTI dataset
+
+
+For self-processing data, please check the scripts in 'data_preprocess' for each individual training data processing:
+
+- `process_3DMatch_Feature.py`: For processing 3DMatch dataset
+- `process_KITTI_Feature.py`: For processing KITTI dataset
 
 ## Training
 
@@ -49,7 +55,7 @@ $python src/train_egnn.py
 ## Evaluation
 
 For evaluation, use the `evaluation.py` script located in the `tools` folder:
-$python tools/evaluation.py
+$python tools/evaluation_metrics.py
 
 ## Citation
 

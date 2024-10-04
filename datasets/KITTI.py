@@ -166,8 +166,165 @@ class KITTItrainVal(data.Dataset):
                  downsample=0.03, 
                  augment_axis=1, 
                  augment_rotation=1.0,
-                 augment_translation=0.01,
-                 ):
+                 augment_translation=0.01):
+        self.root = root
+        self.split = split
+        self.descriptor = descriptor
+        assert descriptor in ['fpfh', 'fcgf']
+        self.in_dim = in_dim
+        self.inlier_threshold = inlier_threshold
+        self.num_node = num_node
+        self.use_mutual = use_mutual
+        self.downsample = downsample
+        self.augment_axis = augment_axis
+        self.augment_rotation = augment_rotation
+        self.augment_translation = augment_translation
+        self.synthetic_pose_flag = True
+        self.normalize_use = False
+
+        # Load the file list based on the split
+        if self.split == 'train':
+            with open(os.path.join(self.root, 'train_files.txt'), 'r') as f:
+                self.file_list = [line.strip() for line in f.readlines()]
+        elif self.split == 'val':
+            with open(os.path.join(self.root, 'val_files.txt'), 'r') as f:
+                self.file_list = [line.strip() for line in f.readlines()]
+        else:
+            raise ValueError(f"Invalid split: {self.split}. Must be 'train' or 'val'.")
+    def __getitem__(self, index):
+        file_name = self.file_list[index]
+
+        # Load data from .pkl file
+        with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
+            data = pickle.load(f)
+
+        # Extract data
+        src_pts = data.get('xyz_0')  # Nx3
+        tar_pts = data.get('xyz_1')  # Mx3
+        src_features = data.get('feat_0')  # Nx32
+        tgt_features = data.get('feat_1')  # Mx32
+        corr = data.get('corr')  # Correspondence (Nx2)
+        labels = data.get('labels')  # Binary labels (N,)
+        gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
+
+        # Normalize features if using FPFH descriptor
+        if self.descriptor == 'fpfh':
+            src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
+            tgt_features = tgt_features / (np.linalg.norm(tgt_features, axis=1, keepdims=True) + 1e-6)
+
+        N_src = len(src_pts)
+        N_tgt = len(tar_pts)
+        # Count the number of ones
+        # num_ones = np.count_nonzero(labels == 1)
+
+        # print(f"Number of ones: {num_ones}")
+        
+        # Sort the points by ray length to sensor origin for ordering
+        sensor_origin = np.array([0, 0, 0])
+        ray_lengths_src = np.linalg.norm(src_pts - sensor_origin, axis=1)
+        sorted_indices_src = np.argsort(ray_lengths_src)
+        
+        ray_lengths_tgt = np.linalg.norm(tar_pts - sensor_origin, axis=1)
+        sorted_indices_tgt = np.argsort(ray_lengths_tgt)
+
+        # Create inverse mappings for sorted indices
+        inverse_map_src = {old: new for new, old in enumerate(sorted_indices_src)}
+        inverse_map_tgt = {old: new for new, old in enumerate(sorted_indices_tgt)}
+
+        # Sample fixed number of points
+        sample_size = self.num_node
+        if sample_size > N_src or sample_size > N_tgt:
+            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        
+        # Separate indices for positive and negative labels
+        pos_indices = np.where(labels == 1)[0]
+        neg_indices = np.where(labels == 0)[0]
+
+        # Sample 60% from positive labels and 40% from negative labels
+        num_pos = int(self.num_node * 0.6)
+        num_neg = self.num_node - num_pos
+
+        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+            print("Not enough positive or negative points to satisfy the 60-40 ratio. so repeating samples will be used!!!")
+
+        pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+        neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+
+        # Combine positive and negative indices
+        sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+
+        # Sample source points and features
+        sampled_src_pts = src_pts[sampled_indices]
+        sampled_src_features = src_features[sampled_indices]
+
+        # Use the second column of corr to get corresponding target indices
+        sampled_corr = corr[sampled_indices]  # Nx2
+        sampled_tgt_indices = sampled_corr[:, 1].astype(int)  # Get target indices
+        sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
+        sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
+
+        # Create remapping for source indices in the new range
+        remap_src = {old_idx: new_idx for new_idx, old_idx in enumerate(sampled_indices)}
+
+        # Create remapping for target indices based on unique sampled target indices
+        unique_tgt_indices = np.unique(sampled_tgt_indices)
+        remap_tgt = {old_idx: new_idx for new_idx, old_idx in enumerate(unique_tgt_indices)}
+
+        # Remap corr source indices to be in the range of self.num_node
+        remapped_corr = np.zeros_like(sampled_corr)
+        remapped_corr[:, 0] = [remap_src[src_idx] for src_idx in sampled_corr[:, 0]]  # Remap source
+        remapped_corr[:, 1] = [remap_tgt[tgt_idx] for tgt_idx in sampled_corr[:, 1]]  # Remap target
+
+        print(remapped_corr)
+        # Retrieve the labels for the resampled source points
+        sampled_labels = labels[sampled_indices]
+
+        # # Now remap target indices
+        # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
+        # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
+        
+        # Data augmentation
+        if self.synthetic_pose_flag:
+            sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
+            aug_T = translation_matrix(self.augment_translation)
+            aug_trans = integrate_trans(aug_R, aug_T)
+            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+
+        # Optional normalization
+        if self.normalize_use:
+            sampled_tgt_pts = transform_target_to_source_frame(sampled_src_pts, sampled_tgt_pts)
+            centroid = np.mean(sampled_src_pts, axis=0)
+            sampled_src_pts -= centroid
+
+        return remapped_corr.astype(np.float32), \
+            sampled_labels.astype(np.float32), \
+            sampled_src_pts.astype(np.float32), \
+            sampled_tgt_pts.astype(np.float32), \
+            sampled_src_features.astype(np.float32), \
+            sampled_tgt_features.astype(np.float32), \
+            gt_trans.astype(np.float32)
+
+                              
+    def __len__(self):
+        return len(self.file_list)
+
+
+class KITTItest(data.Dataset):
+    def __init__(self, 
+                 root, 
+                 split, 
+                 descriptor='fpfh',
+                 in_dim=6,
+                 inlier_threshold=0.10,
+                 num_node=2048, 
+                 use_mutual=True,
+                 downsample=0.03, 
+                 augment_axis=1, 
+                 augment_rotation=1.0,
+                 augment_translation=0.01):
         self.root = root
         self.split = split
         self.descriptor = descriptor
@@ -181,232 +338,6 @@ class KITTItrainVal(data.Dataset):
         self.augment_rotation = augment_rotation
         self.augment_translation = augment_translation
         self.synthetic_pose_flag = False
-        OVERLAP_RATIO = 0.3 
-        DATA_FILES = {
-            'train': '.train_3dmatch.txt',
-            'val': '.val_3dmatch.txt',
-        }
-        # subset_names = open(DATA_FILES[split]).read().split()
-        self.files = []
-        self.length = 0
-        self.normalize_use = False
-        # for name in subset_names:
-        #     fname = name + "*%.2f.txt" % OVERLAP_RATIO
-        #     fnames_txt = glob.glob(root + f"/threedmatch/" + fname)
-        #     assert len(fnames_txt) > 0, f"Make sure that the path {root} has data {fname}"
-        #     for fname_txt in fnames_txt:
-        #         with open(fname_txt) as f:
-        #             content = f.readlines()
-        #         fnames = [x.strip().split() for x in content]
-        #         for fname in fnames:
-        #             self.files.append([fname[0], fname[1]])
-        #             self.length += 1
-        self.gt_trans = {}
-        self.src_filename = None
-        self.tgt_filename = None
-        # for scene in self.scene_list:
-        #     scene_path = f'{self.root}/fragments/{scene}'
-        #     gt_path = f'{self.root}/gt_result/{scene}-evaluation'
-        #     for k, v in self.__loadlog__(gt_path).items():
-        #         self.gt_trans[f'{scene}@{k}'] = v
-        # Read all the filenames from the txt file
-        if self.split == 'train':
-            with open(os.path.join(self.root, 'train_files.txt'), 'r') as f:
-                self.file_list = [line.strip() for line in f.readlines()]
-        elif self.split == 'val':
-            with open(os.path.join(self.root, 'val_files.txt'), 'r') as f:
-                self.file_list = [line.strip() for line in f.readlines()]
-        else:
-            raise ValueError(f"Invalid split: {self.split}. Must be 'train' or 'val'.")
-
-
-    def __getitem__(self, index):
-        # src_id, tgt_id = self.files[index][0], self.files[index][1]
-        # if random.random() > 0.5:
-        #     src_id, tgt_id = tgt_id, src_id
-        print("########   index    #####")
-        print(index)
-        file_name = self.file_list[index]
-
-        # Load the .pkl file
-        with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
-            data = pickle.load(f)
-
-        # Extract the necessary parts of the data
-        self.src_filename = data.get('file_0')
-        self.tgt_filename = data.get('file_1')
-        src_pts = data.get('xyz_0')  # numpy array, for instance
-        tar_pts = data.get('xyz_1')  # string or other type
-        gt_trans = data.get('gt_pose')
-        # Convert the numpy array to a torch tensor, if needed
-        # if isinstance(src_pts, np.ndarray) and isinstance(tar_pts, np.ndarray):
-        #     src_pts = torch.tensor(src_pts, dtype=torch.float32)
-        #     tar_pts = torch.tensor(tar_pts, dtype=torch.float32)
-        print("##########!!!!!!!!!!! points###############")
-        self.length = self.length + 1
-        # if self.length == 2:
-        # print(gt_trans)
-        # time.sleep(5)  # Pause execution for 2 seconds
-
-        src_features = data.get('feat_0')
-        tgt_features = data.get('feat_1')
-        
-        # Normalizing for fpfh
-        if self.descriptor == 'fpfh':
-            src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
-            tgt_features = tgt_features / (np.linalg.norm(tgt_features, axis=1, keepdims=True) + 1e-6)
-
-        # orig_trans = self.gt_trans[key]
-        corr = data.get('corr')
-        labels = data.get('labels')
-
-        N_src = src_features.shape[0]
-        N_tgt = tgt_features.shape[0]
-        # print("$$$$$$$$&&&&&&&&&&&&&$$$$$$$$$$")
-        # print(N_src)
-        # print(N_tgt)
-        # print(self.num_node)
-        print(gt_trans)
-
-        sensor_origin = np.array([0, 0, 0])
-        # Order the points by the ray length to the sensor origin for training convenience
-        xyz0 = data["xyz_0"]
-        feat0 = data["feat_0"]
-        ray_lengths0 = np.linalg.norm(xyz0 - sensor_origin, axis=1)
-        sorted_indices0 = np.argsort(ray_lengths0, kind = 'stable')
-        data["xyz_0"] = xyz0[sorted_indices0]
-        data["feat_0"] = feat0[sorted_indices0]
-        # print("$$$$$$$$$ ordered src points $$$$$$$$")
-        # print(np.linalg.norm(data["xyz_0"] - sensor_origin, axis=1))
-        # Order the points by the ray length to the sensor origin for training convenience
-        xyz1 = data["xyz_1"]
-        feat1 = data["feat_1"]
-        ray_lengths1 = np.linalg.norm(xyz1 - sensor_origin, axis=1)
-        sorted_indices1 = np.argsort(ray_lengths1, kind = 'stable')
-        data["xyz_1"] = xyz1[sorted_indices1]
-        data["feat_1"] = feat1[sorted_indices1]
-        # print("$$$$$$$$$ ordered tar points $$$$$$$$")
-        # print(np.linalg.norm(data["xyz_1"] - sensor_origin, axis=1))
-
-        if N_src < N_tgt:
-            # Modify the "Corr" and "Labels" accordingly
-            data["corr"] = data["corr"][sorted_indices0]        
-            data["labels"] = data["labels"][sorted_indices0]
-        elif N_tgt < N_src:
-            # Modify the "Corr" and "Labels" accordingly
-            data["corr"] = data["corr"][sorted_indices1]        
-            data["labels"] = data["labels"][sorted_indices1]
-
-        if self.synthetic_pose_flag == True:
-            orig_trans = np.eye(4).astype(np.float32)
-            src_pts += np.random.rand(src_pts.shape[0], 3) * 0.005
-            tar_pts += np.random.rand(tar_pts.shape[0], 3) * 0.005
-            aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
-            aug_T = translation_matrix(self.augment_translation)
-            aug_trans = integrate_trans(aug_R, aug_T)
-            src_pts = transform(src_pts, aug_trans)            
-            gt_trans = concatenate(aug_trans, orig_trans)
-
-        if int(N_src) < int(self.num_node) or int(N_tgt) < int(self.num_node):
-            index += 1  # Skip this index and move to the next one
-            if index >= len(self.file_list):
-                raise IndexError("End of dataset reached after skipping.")
-        # Initialize sel_ind as an empty array (in case no condition is met)
-        sel_ind = np.array([])
-
-        if N_src <= N_tgt:
-            sel_ind = np.random.choice(N_src, self.num_node)  # Randomly select self.num_node points from source
-        else:
-            sel_ind = np.random.choice(N_tgt, self.num_node)  # Randomly select self.num_node points from target
-
-        ########### src target , crorrespondence iterate loop   ####################3
-        corr = corr[sel_ind, :]            
-        labels = labels[sel_ind]
-        src_desc = src_features[corr[:, 0], :]
-        tgt_desc = tgt_features[corr[:,1], :]
-        input_src_keypts = src_pts[corr[:, 0]]
-        input_tgt_keypts = tar_pts[corr[:, 1]]
-
-        if self.normalize_use:
-            input_tgt_keypts = transform_target_to_source_frame(input_src_keypts, input_tgt_keypts)
-            centroid = np.mean(input_src_keypts, axis=0)
-            input_src_keypts = input_src_keypts - centroid            
-        # distance = np.sqrt(2 - 2 * (src_desc @ tgt_desc.T) + 1e-6)
-        # source_idx = np.argmin(distance, axis=1)
-        # if self.use_mutual:
-        #     target_idx = np.argmin(distance, axis=0)
-        #     mutual_nearest = (target_idx[source_idx] == np.arange(source_idx.shape[0]))
-        #     corr = np.concatenate([np.where(mutual_nearest == 1)[0][:,None], source_idx[mutual_nearest][:,None]], axis=-1)
-        # else:
-        #     corr = np.concatenate([np.arange(source_idx.shape[0])[:, None], source_idx[:, None]], axis=-1)
-        # if len(corr) < 10:
-        #     return self.__getitem__(int(np.random.choice(self.__len__(),1)))
-        
-        # frag1 = src_keypts[corr[:, 0]]
-        # frag2 = tgt_keypts[corr[:, 1]]
-        # frag1_warp = transform(frag1, gt_trans)
-        # distance = np.sqrt(np.sum(np.power(frag1_warp - frag2, 2), axis=1))
-        # labels = (distance < self.inlier_threshold).astype(np.int)
-
-        # if self.in_dim == 6:
-        #     corr_pos = np.concatenate([input_src_keypts, input_tgt_keypts], axis=-1)
-        #     corr_pos = corr_pos - corr_pos.mean(0)
-
-        return corr.astype(np.float32), \
-               labels.astype(np.float32), \
-               input_src_keypts.astype(np.float32), \
-               input_tgt_keypts.astype(np.float32), \
-               src_desc.astype(np.float32), \
-               tgt_desc.astype(np.float32), \
-               gt_trans.astype(np.float32) 
-               
-    def __len__(self):
-        return len(self.file_list)
-
-
-class KITTItest(data.Dataset):
-    def __init__(self, 
-                 root, 
-                 descriptor='fpfh',
-                 in_dim=6,
-                 inlier_threshold=0.10,
-                 num_node=2048, 
-                 use_mutual=True,
-                 downsample=0.03, 
-                 augment_axis=0, 
-                 augment_rotation=1.0,
-                 augment_translation=0.01,
-                 select_scene=None,
-                 ):
-        self.root = root
-        self.descriptor = descriptor
-        assert descriptor in ['fcgf', 'fpfh']
-        self.in_dim = in_dim
-        self.inlier_threshold = inlier_threshold
-        self.num_node = num_node
-        self.use_mutual = use_mutual
-        self.downsample = downsample
-        self.augment_axis = augment_axis
-        self.augment_rotation = augment_rotation
-        self.augment_translation = augment_translation
-        self.length = 0
-        
-        self.scene_list = [
-            '7-scenes-redkitchen',
-            'sun3d-home_at-home_at_scan1_2013_jan_1',
-            'sun3d-home_md-home_md_scan9_2012_sep_30',
-            'sun3d-hotel_uc-scan3',
-            'sun3d-hotel_umd-maryland_hotel1',
-            'sun3d-hotel_umd-maryland_hotel3',
-            'sun3d-mit_76_studyroom-76-1studyroom2',
-            'sun3d-mit_lab_hj-lab_hj_tea_nov_2_2012_scan1_erika'
-        ]
-        if select_scene in self.scene_list:
-            self.scene_list = [select_scene]
-        
-        self.gt_trans = {}
-        self.src_filename = None
-        self.tgt_filename = None
         self.normalize_use = False
         # for scene in self.scene_list:
         #     scene_path = f'{self.root}/fragments/{scene}'
@@ -417,131 +348,123 @@ class KITTItest(data.Dataset):
         with open(os.path.join(self.root, 'test_files.txt'), 'r') as f:
             self.test_file_list = [line.strip() for line in f.readlines()]
 
-                  
     def __getitem__(self, index):
-        # key = list(self.gt_trans.keys())[index]      
-        # scene = key.split('@')[0]
-        # Get the filename for this index
-        file_name = self.test_file_list[index]
+        file_name = self.file_list[index]
 
-        # Load the .pkl file
-        with open(os.path.join(self.root, 'test_3dmatch', file_name), 'rb') as f:
+        # Load data from .pkl file
+        with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
             data = pickle.load(f)
-        print(data)
-        # Extract the necessary parts of the data
-        self.src_filename = data.get('file_0')
-        self.tgt_filename = data.get('file_1')
-        src_pts = data.get('xyz_0')  # numpy array, for instance
-        tar_pts = data.get('xyz_1')  # string or other type
-        gt_trans = data.get('pose_gt')   ## camera to world pose
-        # Convert the numpy array to a torch tensor, if needed
-        # if isinstance(src_pts, np.ndarray) and isinstance(tar_pts, np.ndarray):
-        #     src_pts = torch.tensor(src_pts, dtype=torch.float32)
-        #     tar_pts = torch.tensor(tar_pts, dtype=torch.float32
-        src_features = data.get('feat_0')
-        tgt_features = data.get('feat_1')
-        print(gt_trans)
-        # Normalizing for fpfh
+
+        # Extract data
+        src_pts = data.get('xyz_0')  # Nx3
+        tar_pts = data.get('xyz_1')  # Mx3
+        src_features = data.get('feat_0')  # Nx32
+        tgt_features = data.get('feat_1')  # Mx32
+        corr = data.get('corr')  # Correspondence (Nx2)
+        labels = data.get('labels')  # Binary labels (N,)
+        gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
+
+        # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
             src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
             tgt_features = tgt_features / (np.linalg.norm(tgt_features, axis=1, keepdims=True) + 1e-6)
 
-        # orig_trans = self.gt_trans[key]
-        corr = data.get('corr')
-        labels = data.get('labels')
+        N_src = len(src_pts)
+        N_tgt = len(tar_pts)
+        # Count the number of ones
+        # num_ones = np.count_nonzero(labels == 1)
 
-
-        N_src = src_features.shape[0]
-        N_tgt = tgt_features.shape[0]
-        print("$$$$$$$$$$$$$$$$$$")
-        print(N_src)
-        print(N_tgt)
-        print(self.num_node)
-
-        sensor_origin = np.array([0, 0, 0])
-        # Order the points by the ray length to the sensor origin for training convenience
-        xyz0 = data["xyz_0"]
-        feat0 = data["feat_0"]
-        ray_lengths0 = np.linalg.norm(xyz0 - sensor_origin, axis=1)
-        sorted_indices0 = np.argsort(ray_lengths0, kind = 'stable')
-        data["xyz_0"] = xyz0[sorted_indices0]
-        data["feat_0"] = feat0[sorted_indices0]
-        # print("$$$$$$$$$ ordered src points $$$$$$$$")
-        # print(np.linalg.norm(data["xyz_0"] - sensor_origin, axis=1))
-        # Order the points by the ray length to the sensor origin for training convenience
-        xyz1 = data["xyz_1"]
-        feat1 = data["feat_1"]
-        ray_lengths1 = np.linalg.norm(xyz1 - sensor_origin, axis=1)
-        sorted_indices1 = np.argsort(ray_lengths1, kind = 'stable')
-        data["xyz_1"] = xyz1[sorted_indices1]
-        data["feat_1"] = feat1[sorted_indices1]
-        # print("$$$$$$$$$ ordered tar points $$$$$$$$")
-        # print(np.linalg.norm(data["xyz_1"] - sensor_origin, axis=1))
-
-        if N_src < N_tgt:
-            # Modify the "Corr" and "Labels" accordingly
-            data["corr"] = data["corr"][sorted_indices0]        
-            data["labels"] = data["labels"][sorted_indices0]
-        elif N_tgt < N_src:
-            # Modify the "Corr" and "Labels" accordingly
-            data["corr"] = data["corr"][sorted_indices1]        
-            data["labels"] = data["labels"][sorted_indices1]
-
-        if int(N_src) < int(self.num_node) or int(N_tgt) < int(self.num_node):
-            index += 1  # Skip this index and move to the next one
-            if index >= len(self.test_file_list):
-                raise IndexError("End of dataset reached after skipping.")
-
-        # Initialize sel_ind as an empty array (in case no condition is met)
-        sel_ind = np.array([])
-
-        if N_src <= N_tgt:
-            sel_ind = np.random.choice(N_src, self.num_node)  # Randomly select self.num_node points from source
-        else:
-            sel_ind = np.random.choice(N_tgt, self.num_node)  # Randomly select self.num_node points from target
-
-        ########### src target , crorrespondence iterate loop   ####################3
-        corr = corr[sel_ind, :]            
-        labels = labels[sel_ind]
-        src_desc = src_features[corr[:, 0], :]
-        tgt_desc = tgt_features[corr[:,1], :]
-        input_src_keypts = src_pts[corr[:, 0]]
-        input_tgt_keypts = tar_pts[corr[:, 1]]
-
-
-        distance = np.sqrt(2 - 2 * (src_desc @ tgt_desc.T) + 1e-6)
-        source_idx = np.argmin(distance, axis=1)
-
-        #######normalize to source frame as origin, to get rid of nan issues############
-        if self.normalize_use:
-            input_tgt_keypts = transform_target_to_source_frame(input_src_keypts, input_tgt_keypts)
-            centroid = np.mean(input_src_keypts, axis=0)
-            input_src_keypts = input_src_keypts - centroid         
-        # if self.use_mutual:
-        #     target_idx = np.argmin(distance, axis=0)
-        #     mutual_nearest = (target_idx[source_idx] == np.arange(source_idx.shape[0]))
-        #     corr = np.concatenate([np.where(mutual_nearest == 1)[0][:,None], source_idx[mutual_nearest][:,None]], axis=-1)
-        # else:
-        #     corr = np.concatenate([np.arange(source_idx.shape[0])[:, None], source_idx[:, None]], axis=-1)
+        # print(f"Number of ones: {num_ones}")
         
-        # frag1 = src_keypts[corr[:, 0]]
-        # frag2 = tgt_keypts[corr[:, 1]]
-        # frag1_warp = transform(frag1, orig_trans)
-        # distance = np.sqrt(np.sum(np.power(frag1_warp - frag2, 2), axis=1))
-        # labels = (distance < self.inlier_threshold).astype(np.int)
+        # Sort the points by ray length to sensor origin for ordering
+        sensor_origin = np.array([0, 0, 0])
+        ray_lengths_src = np.linalg.norm(src_pts - sensor_origin, axis=1)
+        sorted_indices_src = np.argsort(ray_lengths_src)
+        
+        ray_lengths_tgt = np.linalg.norm(tar_pts - sensor_origin, axis=1)
+        sorted_indices_tgt = np.argsort(ray_lengths_tgt)
 
-        # if self.in_dim == 6:
-        #     corr_pos = np.concatenate([input_src_keypts, input_tgt_keypts], axis=-1)
-        #     corr_pos = corr_pos - corr_pos.mean(0)
+        # Create inverse mappings for sorted indices
+        inverse_map_src = {old: new for new, old in enumerate(sorted_indices_src)}
+        inverse_map_tgt = {old: new for new, old in enumerate(sorted_indices_tgt)}
 
-        return corr.astype(np.float32), \
-               labels.astype(np.float32), \
-               input_src_keypts.astype(np.float32), \
-               input_tgt_keypts.astype(np.float32), \
-               src_desc.astype(np.float32), \
-               tgt_desc.astype(np.float32), \
-               gt_trans.astype(np.float32)     
-       
+        # Sample fixed number of points
+        sample_size = self.num_node
+        if sample_size > N_src or sample_size > N_tgt:
+            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        
+        # Separate indices for positive and negative labels
+        pos_indices = np.where(labels == 1)[0]
+        neg_indices = np.where(labels == 0)[0]
+
+        # Sample 60% from positive labels and 40% from negative labels
+        num_pos = int(self.num_node * 0.6)
+        num_neg = self.num_node - num_pos
+
+        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+            print("Not enough positive or negative points to satisfy the 60-40 ratio. so repeating samples will be used!!!")
+
+        pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+        neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+
+        # Combine positive and negative indices
+        sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+
+        # Sample source points and features
+        sampled_src_pts = src_pts[sampled_indices]
+        sampled_src_features = src_features[sampled_indices]
+
+        # Use the second column of corr to get corresponding target indices
+        sampled_corr = corr[sampled_indices]  # Nx2
+        sampled_tgt_indices = sampled_corr[:, 1].astype(int)  # Get target indices
+        sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
+        sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
+
+        # Create remapping for source indices in the new range
+        remap_src = {old_idx: new_idx for new_idx, old_idx in enumerate(sampled_indices)}
+
+        # Create remapping for target indices based on unique sampled target indices
+        unique_tgt_indices = np.unique(sampled_tgt_indices)
+        remap_tgt = {old_idx: new_idx for new_idx, old_idx in enumerate(unique_tgt_indices)}
+
+        # Remap corr source indices to be in the range of self.num_node
+        remapped_corr = np.zeros_like(sampled_corr)
+        remapped_corr[:, 0] = [remap_src[src_idx] for src_idx in sampled_corr[:, 0]]  # Remap source
+        remapped_corr[:, 1] = [remap_tgt[tgt_idx] for tgt_idx in sampled_corr[:, 1]]  # Remap target
+
+        print(remapped_corr)
+        # Retrieve the labels for the resampled source points
+        sampled_labels = labels[sampled_indices]
+
+        # # Now remap target indices
+        # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
+        # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
+        
+        # Data augmentation
+        if self.synthetic_pose_flag:
+            sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
+            aug_T = translation_matrix(self.augment_translation)
+            aug_trans = integrate_trans(aug_R, aug_T)
+            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+
+        # Optional normalization
+        if self.normalize_use:
+            sampled_tgt_pts = transform_target_to_source_frame(sampled_src_pts, sampled_tgt_pts)
+            centroid = np.mean(sampled_src_pts, axis=0)
+            sampled_src_pts -= centroid
+
+        return remapped_corr.astype(np.float32), \
+            sampled_labels.astype(np.float32), \
+            sampled_src_pts.astype(np.float32), \
+            sampled_tgt_pts.astype(np.float32), \
+            sampled_src_features.astype(np.float32), \
+            sampled_tgt_features.astype(np.float32), \
+            gt_trans.astype(np.float32)
+                  
+
     def __len__(self):
         return len(self.test_file_list)
     

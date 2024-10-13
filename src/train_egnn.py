@@ -918,7 +918,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
 
         # Save checkpoint every 16 epochs
         if (epoch + 1) % 16 == 0 or (epoch + 1) == num_epochs:
-            checkpoint_path = f"{save_path}_epoch_{epoch + 1}.pth"
+            checkpoint_path = "./checkpoints"
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
 def get_args():

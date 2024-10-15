@@ -16,7 +16,7 @@ Below is an overview of our EGNN model architecture:
 
 ## Environment Setup
 The code is tested on **pyg (Pytorch-Geometric)** **2.4.0**, **python 3.8**, **Pytorch 2.0.0**, **cuda11.8**, **GPU RAM** at least 8GB with batch size 1 on **GTX 2080** above.
-Noted, my current code implementation with batch size one only consumes less than **0.5GB** RAM on GPU!!! and the batch size by default is set to one, other than one  may result in some training error, I will fix the batch size bug soon, please stay tuned, and batch size one can be enough for the current training as data size is not that big. The code can be ported onto edge device easily to support mobile applications.
+Noted, my current code implementation with batch size one only consumes less than **0.9GB** RAM for 2048 points on GPU!!! and the batch size by default is set to one, other than one  may result in some training error, I will fix the batch size bug soon, please stay tuned, and batch size one can be enough for the current training as data size is not that big. The code can be ported onto edge device easily to support mobile applications.
 
 To set up the environment for this project, we use Conda. Follow these steps:
 
@@ -41,11 +41,12 @@ For the two dataloaders of datasets, we provide dataloader scripts in the `datas
 - `3DMatch.py`: For processing 3DMatch dataset
 - `KITTI.py`: For processing KITTI dataset
 
-
-For self-processing data, please check the scripts in 'data_preprocess' for each individual training data processing:
-
-- `process_3DMatch_Feature.py`: For processing 3DMatch dataset
+## Custom Data Processing
+For self-processing data, please check the scripts in 'data_preprocess' folder for each individual training data processing:
+If you own dataset is ordered sequence point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $i$ th and $i+1$ th frame respectively.
 - `process_KITTI_Feature.py`: For processing KITTI dataset
+Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
+- `process_3DMatch_Feature.py`: For processing 3DMatch dataset
 
 ## Training
 
@@ -62,7 +63,10 @@ $python tools/evaluation_metrics.py
 If you find our work useful in your research, please consider citing:
 
 ```bibtex
-@article{kangequi,
+@article{kang2024equi,
   title={Equi-GSPR: Equivariant SE (3) Graph Network Model for Sparse Point Cloud Registration},
-  author={Kang, Xueyang and Luan, Zhaoliang and Khoshelham, Kourosh and Wang, Bing}
+  author={Kang, Xueyang and Luan, Zhaoliang and Khoshelham, Kourosh and Wang, Bing},
+  journal={arXiv preprint arXiv:2410.05729},
+  year={2024},
+  publisher={Springer}
 }

@@ -467,6 +467,39 @@ def rotation_matrix_to_quaternion(rotation_matrix):
 
     return quaternion
 
+def quaternion_to_matrix(quaternion, device):
+    """
+    Converts a quaternion into a 3x3 rotation matrix, ensuring the operation runs on the specified device.
+    
+    Args:
+        quaternion (torch.Tensor): A tensor of shape (4,) representing (w, x, y, z).
+        device (torch.device): The device (e.g., 'cuda' or 'cpu') on which the operation should run.
+        
+    Returns:
+        torch.Tensor: A 3x3 rotation matrix on the specified device.
+    """
+    w, x, y, z = quaternion
+
+    # Ensure all operations are done on the correct device
+    r00 = 1 - 2 * (y ** 2 + z ** 2)
+    r01 = 2 * (x * y - z * w)
+    r02 = 2 * (x * z + y * w)
+
+    r10 = 2 * (x * y + z * w)
+    r11 = 1 - 2 * (x ** 2 + z ** 2)
+    r12 = 2 * (y * z - x * w)
+
+    r20 = 2 * (x * z - y * w)
+    r21 = 2 * (y * z + x * w)
+    r22 = 1 - 2 * (x ** 2 + y ** 2)
+
+    # Create the 3x3 rotation matrix on the correct device
+    rotation_matrix = torch.tensor([[r00, r01, r02],
+                                    [r10, r11, r12],
+                                    [r20, r21, r22]], device=device)
+
+    return rotation_matrix
+
 class CrossAttentionPoseRegression(nn.Module):
     def __init__(self, egnn: EGNN, num_nodes: int = 2048, hidden_nf: int = 35, device='cuda:0'):
         super(CrossAttentionPoseRegression, self).__init__()
@@ -921,6 +954,103 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
             checkpoint_path = "./checkpoints"
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
+def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=False):
+    """
+    Evaluate the model using a saved checkpoint, and print the predicted pose as a homogeneous transform matrix.
+
+    Args:
+        checkpoint_path (str): Path to the checkpoint to be loaded.
+        model (torch.nn.Module): The model to be evaluated.
+        dataloader (torch.utils.data.DataLoader): Dataloader for the evaluation data.
+        device (torch.device): Device to run evaluation on (e.g., 'cuda' or 'cpu').
+        use_pointnet (bool): Whether to use PointNet encoder.
+
+    Returns:
+        float: The average loss over the evaluation dataset.
+    """
+    # Load the checkpoint and restore the model's weights
+    egnn = model.egnn
+    cross_attention = model  # CrossAttentionPoseRegression is the top-level model
+
+    # If using PointNet, define the PointNet encoder
+    if use_pointnet:
+        pointnet = PointNet().to(device)
+    else:
+        pointnet = None
+
+    # Load the checkpoint
+    _, epoch = load_checkpoint(checkpoint_path, pointnet, egnn, cross_attention, optimizer=None, use_pointnet=use_pointnet, device=device)
+    print(f"Checkpoint loaded from epoch {epoch}")
+
+    # Set the model to evaluation mode
+    model.eval()
+
+    total_loss = 0.0
+    total_pose_loss = 0.0
+    total_corr_loss = 0.0
+    num_batches = 0
+
+    with torch.no_grad():  # Disable gradient calculation for evaluation
+        for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
+            # Skip batches with missing data
+            if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
+                continue
+
+            # Move data to the device
+            corr = corr.to(device)
+            labels = labels.to(device)
+            xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
+            feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
+            gt_pose = gt_pose.to(device)
+
+            # KNN graph computation (same as in training)
+            k = 12
+            graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
+            graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
+
+            # Descriptor generation using PointNet or pre-computed features
+            if use_pointnet:
+                feat_0 = pointnet(xyz_0, graph_idx_0, None)
+                feat_1 = pointnet(xyz_1, graph_idx_1, None)
+
+            # Get edges and edge attributes
+            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
+            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
+
+            # Forward pass through the model (no backprop in evaluation)
+            quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
+
+            # Convert quaternion and translation to a homogeneous transform matrix
+            for i in range(quaternion.size(0)):  # Process each batch item
+                rot_matrix = quaternion_to_matrix(quaternion[i], device=device)  # Ensure quaternion to matrix is on the correct device
+                trans_vector = translation[i]
+
+                # Create a 4x4 homogeneous transformation matrix
+                hom_matrix = torch.eye(4, device=device)  # Create on device
+                hom_matrix[:3, :3] = rot_matrix
+                hom_matrix[:3, 3] = trans_vector
+
+                print(f"Predicted Pose (Batch {batch_idx}, Item {i}):")
+                print(hom_matrix)
+
+            # Compute pose loss
+            pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
+
+            # Combine pose and correspondence losses
+            loss = pose_losses + corr_loss
+            total_loss += loss.item()
+            total_pose_loss += pose_losses.item()
+            total_corr_loss += corr_loss.item()
+            num_batches += 1
+
+    # Calculate average losses
+    avg_loss = total_loss / num_batches
+    avg_pose_loss = total_pose_loss / num_batches
+    avg_corr_loss = total_corr_loss / num_batches
+
+    print(f"Evaluation completed. Avg Loss: {avg_loss:.4f}, Avg Pose Loss: {avg_pose_loss:.4f}, Avg Corr Loss: {avg_corr_loss:.4f}")
+    return avg_loss, avg_pose_loss, avg_corr_loss
+
 def get_args():
     parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
     
@@ -964,7 +1094,8 @@ if __name__ == "__main__":
     mode = args.mode
     savepath = args.savepath
 
-    mode = "train"
+    mode = "train" ### set to "eval" for inference mode
+
     train_dataset = ThreeDMatchTrainVal(root=base_dir, 
                             split=mode,   
                             descriptor='fcgf',
@@ -990,11 +1121,27 @@ if __name__ == "__main__":
                             augment_rotation=1.0,
                             augment_translation=0.01,
                         )
+
+    test_dataset = ThreeDMatchTest(root=base_dir, 
+                            split='test',   
+                            descriptor='fcgf',
+                            in_dim=6,
+                            inlier_threshold=0.10,
+                            num_node=2048, 
+                            use_mutual=True,
+                            downsample=0.03, 
+                            augment_axis=1, 
+                            augment_rotation=1.0,
+                            augment_translation=0.01,
+                        )
     # Instantiate the dataset
 
     # # Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    if mode == "train":
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    elif mode == "eval":
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     egnn = EGNN(in_node_nf=in_node_nf, hidden_nf=hidden_node_nf, out_node_nf=out_node_nf, in_edge_nf=1, n_layers=n_layers)
     egnn.to(dev)
@@ -1004,6 +1151,10 @@ if __name__ == "__main__":
     cross_attention_model.to(dev)
 
     # cross_attention_model(h, x, graph_idx1, edge_attr1, h, x, graph_idx1, edge_attr1)
-
-    train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
+    ##########comment these lines during evaluation mode#################
+    if mode == "train":
+        train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
                 learning_rate=learning_rate, device=dev, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
+    elif mode == "test":
+        checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
+        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)

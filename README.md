@@ -57,6 +57,8 @@ $python src/train_eval_egnn.py
 
 One more thing to the training of custom dataset training, you can set "use_pointnet"  flag in the train model code to true, so that the model will train the model in end2end way from input point cloud scan pair to feature descriptor extraction, and until to equi-gnn regression, as custom dataset scenes may have some gap to indoor 3D Match or KITTI outdoor datasets. But indeed some more training time and tuning of layer hyper-params may be needed for this end2end training, and we also recommend you to use pre-trained  [PointTransformerV2](https://github.com/Pointcept/PointTransformerV2), [PointTransformerV3](https://github.com/Pointcept/PointTransformerV3), the point transformer can be used as encoder for point feature descriptor extraction, to replace pointnet encoder in the code. By using the pre-trained -point transformer encoder weights fine-tuned on custom dataset you can mitigate the data gap, and it helps to converge fast based on our recent tests.
 
+tensorboard logs are exported under "./runs" directory relative to the run script.
+
 ## Evaluation
 
 In same train_eval_egnn.py, set the "mode" variable in the main function to "test" mode, then run it to load the test data for evaluation.

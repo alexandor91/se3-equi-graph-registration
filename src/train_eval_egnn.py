@@ -32,6 +32,7 @@ from torch_geometric.transforms import SamplePoints, KNNGraph
 import torch_geometric.transforms as T
 from torch_cluster import knn_graph
 from torch_scatter import scatter_add
+from torch.utils.tensorboard import SummaryWriter
 import sys
 import importlib.util
 
@@ -650,7 +651,7 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.0):
     return quaternion_loss + translation_loss
 
 # Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, use_pointnet=False, log_interval=10, beta=0.1):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=5, beta=0.1):
     model.train()
     running_loss = 0.0
 
@@ -733,11 +734,16 @@ def train_one_epoch(model, dataloader, optimizer, device, use_pointnet=False, lo
         # Print loss for every log_interval batches
         if (batch_idx+1) % log_interval == 0:
             print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.4f}')
+        avg_loss = running_loss / len(dataloader)
+        print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+        # Log the average loss for this epoch
+        writer.add_scalar('Loss/train', avg_loss, epoch)
+        
+        return avg_loss
 
-    return running_loss / len(dataloader)
 
 # Function to validate the model on the validation set
-def validate(model, dataloader, device, use_pointnet=False):
+def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
     model.eval()  # Set model to evaluation mode
     running_loss = 0.0  # Track overall loss
     running_corr_loss = 0.0  # Track correspondence rank loss
@@ -824,10 +830,15 @@ def validate(model, dataloader, device, use_pointnet=False):
 
     print(f'Validation Loss: {avg_loss:.4f} | Pose Loss: {avg_pose_loss:.4f} | Correspondence Loss: {avg_corr_loss:.4f}')
 
+    # Log validation losses
+    writer.add_scalar('Loss/validation', avg_loss, epoch)
+    writer.add_scalar('Pose_Loss/validation', avg_pose_loss, epoch)
+    writer.add_scalar('Correspondence_Loss/validation', avg_corr_loss, epoch)
+
     return avg_loss, avg_pose_loss, avg_corr_loss
 
 # Save the checkpoint
-def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", use_pointnet=False):
+def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
     """
     Saves the model checkpoint, including PointNet encoder (if used), EGNN layers, CrossAttentionPoseRegression, and optimizer state.
 
@@ -860,6 +871,12 @@ def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir=
 
     torch.save(checkpoint, save_path)
     print(f"Checkpoint saved at epoch {epoch} to {save_path}")
+
+    # If this is the best model so far, save it as the best checkpoint
+    if is_best:
+        save_path = os.path.join(save_dir, 'best_checkpoint')
+        torch.save(checkpoint, save_path)
+        print(f"Best Checkpoint saved at epoch {epoch} to {save_path}")
 
 
 def load_checkpoint(checkpoint_path, pointnet=None, egnn=None, cross_attention=None, optimizer=None, use_pointnet=False, device='cuda:0'):
@@ -909,7 +926,7 @@ def load_checkpoint(checkpoint_path, pointnet=None, egnn=None, cross_attention=N
     return checkpoint, checkpoint.get('epoch', 0)
 
 # Main training loop
-def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device, use_pointnet=False, log_interval=10, beta=0.1, save_path="./checkpoints"):
+def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device, writer, use_pointnet=False, log_interval=10, beta=0.1, save_path="./checkpoints"):
     """
     Train the model and save checkpoints during training.
 
@@ -925,6 +942,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         save_path (str): Path to save the model checkpoints.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    best_val_loss = float('inf')  # Track the best validation loss
 
     # If using PointNet encoder, initialize it separately
     if use_pointnet:
@@ -939,19 +957,25 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
     for epoch in range(num_epochs):
         # Train for one epoch
         print(f'\nEpoch {epoch + 1}/{num_epochs}')
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, use_pointnet, log_interval, beta)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta)
 
         # Validate every few epochs (e.g., every 5 epochs)
         if (epoch + 1) % 1 == 0:
-            val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, use_pointnet)
+            val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, epoch, writer, use_pointnet)
             print(val_loss)
             print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
         else:
             print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.4f}')
 
+        # Save the checkpoint if the validation loss is the best so far
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, save_path, is_best=True, use_pointnet=use_pointnet)
+            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.4f}')
+
         # Save checkpoint every 16 epochs
         if (epoch + 1) % 16 == 0 or (epoch + 1) == num_epochs:
-            checkpoint_path = "./checkpoints"
+            checkpoint_path = save_path  #"./checkpoints"
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
 def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=False):
@@ -1136,6 +1160,14 @@ if __name__ == "__main__":
                         )
     # Instantiate the dataset
 
+
+    # Initialize TensorBoard writer
+    # Ensure the directory exists
+    if not os.path.exists('runs/pose_regression_experiment'):
+        os.makedirs('runs/pose_regression_experiment')
+        print("Created directory for log init runs/pose_regression_experiment")
+    writer = SummaryWriter(log_dir='runs/pose_regression_experiment')
+
     # # Create DataLoaders
     if mode == "train":
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -1154,7 +1186,7 @@ if __name__ == "__main__":
     ##########comment these lines during evaluation mode#################
     if mode == "train":
         train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
-                learning_rate=learning_rate, device=dev, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
+                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
         avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)

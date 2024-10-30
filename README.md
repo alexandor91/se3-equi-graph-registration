@@ -71,10 +71,11 @@ $python tools/evaluation_metrics.py
 If you find our work useful in your research, please consider citing:
 
 ```bibtex
-@article{kang2024equi,
+@inproceedings{kang2025equi,
   title={Equi-GSPR: Equivariant SE (3) Graph Network Model for Sparse Point Cloud Registration},
   author={Kang, Xueyang and Luan, Zhaoliang and Khoshelham, Kourosh and Wang, Bing},
-  journal={arXiv preprint arXiv:2410.05729},
-  year={2024},
-  publisher={Springer}
+  booktitle={European Conference on Computer Vision},
+  pages={149--167},
+  year={2025},
+  organization={Springer}
 }

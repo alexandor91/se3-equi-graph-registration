@@ -9,6 +9,9 @@ import pickle
 import torch
 import glob
 import os
+from util.trajectory import read_trajectory
+from scipy.spatial import cKDTree
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
@@ -42,6 +45,96 @@ def odometry_to_positions(odometry):
 def _get_velodyne_fn(drive, t):
     fname = root + '/sequences/%02d/velodyne/%06d.bin' % (drive, t)
     return fname
+
+
+
+def compute_correspondences_and_labels(xyz_0, xyz_1, feat_0, feat_1, gt_pose, sim_threshold=0.9, dist_threshold=0.06):
+    """
+    Compute correspondences and labels between source and target point clouds.
+    
+    Args:
+        xyz_0 (np.ndarray): Source point cloud, shape [N, 3].
+        xyz_1 (np.ndarray): Target point cloud, shape [M, 3].
+        feat_0 (np.ndarray): Source feature descriptors, shape [N, D].
+        feat_1 (np.ndarray): Target feature descriptors, shape [M, D].
+        gt_pose (np.ndarray): Ground truth transformation matrix, shape [4, 4].
+        sim_threshold (float): Threshold for dot product similarity.
+        dist_threshold (float): Threshold for Euclidean distance in the transformed space.
+
+    Returns:
+        dict: Contains 'corr' and 'labels' arrays.
+              'corr' - Nx2 array where each row is a (source_idx, target_idx) correspondence.
+              'labels' - Binary labels array of shape [N], where 1 indicates a valid correspondence.
+    """
+    # Transform source points to the target frame
+    xyz_0_h = np.concatenate([xyz_0, np.ones((xyz_0.shape[0], 1))], axis=1)  # Homogeneous coordinates
+    xyz_0_transformed = (gt_pose @ xyz_0_h.T).T[:, :3]  # Transform and remove the homogeneous coordinate
+    
+    # Initialize correspondence and label arrays
+    correspondences = []
+    labels = np.zeros(xyz_0.shape[0], dtype=np.int32)
+    
+    # Compute the dot product similarity matrix between all source and target feature descriptors
+    feat_similarity = feat_0 @ feat_1.T  # Shape [N, M]
+    
+    for src_idx in range(xyz_0.shape[0]):
+        # Find potential matches in target based on similarity threshold
+        similarity_mask = feat_similarity[src_idx] >= sim_threshold
+        potential_matches = np.where(similarity_mask)[0]
+        
+        if len(potential_matches) == 0:
+            # If no target points meet the similarity threshold, skip to next source point
+            continue
+        
+        # Calculate distances from transformed source point to target points
+        distances = np.linalg.norm(xyz_0_transformed[src_idx] - xyz_1[potential_matches], axis=1)
+        
+        # Filter potential matches based on distance threshold
+        valid_matches = potential_matches[distances <= dist_threshold]
+        
+        if len(valid_matches) > 0:
+            # If both similarity and distance conditions are met
+            target_idx = valid_matches[np.argmin(distances[distances <= dist_threshold])]
+            correspondences.append([src_idx, target_idx])
+            labels[src_idx] = 1
+        else:
+            # If only the distance condition is met with relaxed threshold
+            relaxed_distances = np.linalg.norm(xyz_0_transformed[src_idx] - xyz_1, axis=1)
+            if np.min(relaxed_distances) <= dist_threshold * 1.5:  # Relaxed threshold
+                target_idx = np.argmin(relaxed_distances)
+                correspondences.append([src_idx, target_idx])
+                labels[src_idx] = 0  # Relaxed match
+
+    return {'corr': np.array(correspondences), 'labels': labels}
+
+def compute_correspondences(feat_0, feat_1, xyz_0, xyz_1, gt_pose, feat_threshold=0.8, dist_threshold=0.05, relaxed_dist_threshold=0.1):
+    # Apply GT pose to transform xyz_0 into target frame
+    xyz_0_transformed = (gt_pose[:3, :3] @ xyz_0.T + gt_pose[:3, 3:4]).T
+    
+    # Initialize correspondence and label arrays
+    corr = np.zeros((len(xyz_0), 2), dtype=int)
+    labels = np.zeros(len(xyz_0), dtype=int)
+    
+    # Create a KDTree for the target point cloud for fast nearest-neighbor search
+    tree = cKDTree(xyz_1)
+    
+    for i, (feat_src, point_src_trans) in enumerate(zip(feat_0, xyz_0_transformed)):
+        # Find the nearest neighbor in target for each transformed source point
+        dist, j = tree.query(point_src_trans)
+        
+        # Check distance threshold and feature similarity
+        feat_similarity = np.dot(feat_src, feat_1[j])
+        
+        if dist < dist_threshold and feat_similarity > feat_threshold:
+            # Both distance and feature similarity conditions are met
+            corr[i] = [i, j]
+            labels[i] = 1
+        elif dist < relaxed_dist_threshold:
+            # Only the distance condition (relaxed threshold) is met
+            corr[i] = [i, j]
+            labels[i] = 0
+
+    return corr, labels
 
 
 if __name__ == '__main__':
@@ -134,40 +227,31 @@ if __name__ == '__main__':
             drive = files[idx][0]
             t0, t1 = files[idx][1], files[idx][2]
             all_odometry = get_video_odometry(drive, [t0, t1])
-            positions = [odometry_to_positions(
-                odometry) for odometry in all_odometry]  # pose: 4*4
+            positions = [odometry_to_positions(odometry) for odometry in all_odometry]
             fname0 = _get_velodyne_fn(drive, t0)
             fname1 = _get_velodyne_fn(drive, t1)
 
-            # XYZ and reflectance
             xyzr0 = np.fromfile(fname0, dtype=np.float32).reshape(-1, 4)
             xyzr1 = np.fromfile(fname1, dtype=np.float32).reshape(-1, 4)
-            # XYZ
             xyz0 = xyzr0[:, :3]
             xyz1 = xyzr1[:, :3]
 
             key = '%d_%d_%d' % (drive, t0, t1)
-            # get pose_gt
-            if phase == 'test':
-                _, sel0 = ME.utils.sparse_quantize(
-                    xyz0 / 0.05, return_index=True)
-                _, sel1 = ME.utils.sparse_quantize(
-                    xyz1 / 0.05, return_index=True)
+            if phase == 'test' or phase == 'train':
+                _, sel0 = ME.utils.sparse_quantize(xyz0 / 0.05, return_index=True)
+                _, sel1 = ME.utils.sparse_quantize(xyz1 / 0.05, return_index=True)
 
-                M = (velo2cam @ positions[0].T @ np.linalg.inv(positions[1].T)
-                     @ np.linalg.inv(velo2cam)).T
+                M = (velo2cam @ positions[0].T @ np.linalg.inv(positions[1].T) @ np.linalg.inv(velo2cam)).T
                 xyz0_t = apply_transform(xyz0[sel0], M)
                 pcd0 = make_open3d_point_cloud(xyz0_t)
                 pcd1 = make_open3d_point_cloud(xyz1[sel1])
-                reg = o3d.pipelines.registration.registration_icp(
-                    pcd0, pcd1, 0.2, np.eye(4),
+                reg = o3d.pipelines.registration.registration_icp(pcd0, pcd1, 0.2, np.eye(4),
                     o3d.pipelines.registration.TransformationEstimationPointToPoint(),
                     o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=200))
                 pcd0.transform(reg.transformation)
                 trans = M @ reg.transformation
-                result['pose_gt'] = trans
+                result['gt_pose'] = trans
 
-            # Get feature
             feats_0, feats_1 = [], []
             feats_0.append(np.ones((len(xyz0), 1)))
             feats_0 = np.hstack(feats_0)
@@ -176,32 +260,26 @@ if __name__ == '__main__':
 
             with torch.no_grad():
                 coords_0 = np.floor(xyz0 / 0.3)
-                coords_0, inds_0 = ME.utils.sparse_quantize(
-                    coords_0, return_index=True)
+                coords_0, inds_0 = ME.utils.sparse_quantize(coords_0, return_index=True)
                 coords_0 = ME.utils.batched_coordinates([coords_0])
                 return_coords_0 = xyz0[inds_0]
                 feats_0 = feats_0[inds_0]
-                # Make point clouds using voxelized points
                 pcd0 = make_open3d_point_cloud(xyz0[inds_0])
                 feats_0 = torch.tensor(feats_0, dtype=torch.float32)
                 coords_0 = torch.tensor(coords_0, dtype=torch.int32)
-                stensor_0 = ME.SparseTensor(
-                    feats_0, coordinates=coords_0, device=device)
-                feat0 = model(stensor_0)
+                stensor_0 = ME.SparseTensor(feats_0, coordinates=coords_0, device=device)
+                feat0 = model(stensor_0).F.detach().cpu().numpy()
 
                 coords_1 = np.floor(xyz1 / 0.3)
-                coords_1, inds_1 = ME.utils.sparse_quantize(
-                    coords_1, return_index=True)
+                coords_1, inds_1 = ME.utils.sparse_quantize(coords_1, return_index=True)
                 coords_1 = ME.utils.batched_coordinates([coords_1])
                 return_coords_1 = xyz1[inds_1]
                 feats_1 = feats_1[inds_1]
-                # Make point clouds using voxelized points
                 pcd1 = make_open3d_point_cloud(xyz1[inds_1])
                 feats_1 = torch.tensor(feats_1, dtype=torch.float32)
                 coords_1 = torch.tensor(coords_1, dtype=torch.int32)
-                stensor_1 = ME.SparseTensor(
-                    feats_1, coordinates=coords_1, device=device)
-                feat1 = model(stensor_1)
+                stensor_1 = ME.SparseTensor(feats_1, coordinates=coords_1, device=device)
+                feat1 = model(stensor_1).F.detach().cpu().numpy()
 
             # # get predicted relative pose
             # feat0_ = make_open3d_feature(feat0.F.detach(), 32, feat0.shape[0])
@@ -217,15 +295,23 @@ if __name__ == '__main__':
             #     ], o3d.pipelines.registration.RANSACConvergenceCriteria(4000000, 10000))
             # T_ransac = torch.from_numpy(
             #     ransac_result.transformation.astype(np.float32)) # T_ransac: predicted pose
+            # Generate correspondences and labels
+            # Calculate correspondences and labels
+            corr, labels = compute_correspondences(
+                feat0, feat1, return_coords_0, return_coords_1, trans   #########trans shoudl be from source to target relative transform####
+            )
+            corr = np.array([[i, i] for i in range(len(return_coords_0))])  # Example correspondence (identity)
+            labels = np.ones((len(corr),), dtype=int)  # Example labels
 
             result['seq_file0_file1'] = key
             result['xyz_0'] = return_coords_0
             result['xyz_1'] = return_coords_1
-            result['feat_0'] = feat0.F.detach().cpu().numpy()
-            result['feat_1'] = feat1.F.detach().cpu().numpy()
-            # result['predict_pose'] = T_ransac.detach().cpu().numpy()
+            result['feat_0'] = feat0
+            result['feat_1'] = feat1
+            result['corr'] = corr
+            result['labels'] = labels
+            result['gt_pose'] = trans
 
-            # output
             out_path = os.path.join(out_folder, '%s_kitti' % phase)
             if not os.path.exists(out_path):
                 os.makedirs(out_path)

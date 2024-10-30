@@ -8,6 +8,7 @@ from tqdm import tqdm
 import MinkowskiEngine as ME
 from model import load_model
 from util.trajectory import read_trajectory
+from scipy.spatial import cKDTree
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "6"
@@ -23,6 +24,94 @@ def make_open3d_point_cloud(xyz, color=None):
     return pcd
 
 
+def compute_correspondences_and_labels(xyz_0, xyz_1, feat_0, feat_1, gt_pose, sim_threshold=0.9, dist_threshold=0.06):
+    """
+    Compute correspondences and labels between source and target point clouds.
+    
+    Args:
+        xyz_0 (np.ndarray): Source point cloud, shape [N, 3].
+        xyz_1 (np.ndarray): Target point cloud, shape [M, 3].
+        feat_0 (np.ndarray): Source feature descriptors, shape [N, D].
+        feat_1 (np.ndarray): Target feature descriptors, shape [M, D].
+        gt_pose (np.ndarray): Ground truth transformation matrix, shape [4, 4].
+        sim_threshold (float): Threshold for dot product similarity.
+        dist_threshold (float): Threshold for Euclidean distance in the transformed space.
+
+    Returns:
+        dict: Contains 'corr' and 'labels' arrays.
+              'corr' - Nx2 array where each row is a (source_idx, target_idx) correspondence.
+              'labels' - Binary labels array of shape [N], where 1 indicates a valid correspondence.
+    """
+    # Transform source points to the target frame
+    xyz_0_h = np.concatenate([xyz_0, np.ones((xyz_0.shape[0], 1))], axis=1)  # Homogeneous coordinates
+    xyz_0_transformed = (gt_pose @ xyz_0_h.T).T[:, :3]  # Transform and remove the homogeneous coordinate
+    
+    # Initialize correspondence and label arrays
+    correspondences = []
+    labels = np.zeros(xyz_0.shape[0], dtype=np.int32)
+    
+    # Compute the dot product similarity matrix between all source and target feature descriptors
+    feat_similarity = feat_0 @ feat_1.T  # Shape [N, M]
+    
+    for src_idx in range(xyz_0.shape[0]):
+        # Find potential matches in target based on similarity threshold
+        similarity_mask = feat_similarity[src_idx] >= sim_threshold
+        potential_matches = np.where(similarity_mask)[0]
+        
+        if len(potential_matches) == 0:
+            # If no target points meet the similarity threshold, skip to next source point
+            continue
+        
+        # Calculate distances from transformed source point to target points
+        distances = np.linalg.norm(xyz_0_transformed[src_idx] - xyz_1[potential_matches], axis=1)
+        
+        # Filter potential matches based on distance threshold
+        valid_matches = potential_matches[distances <= dist_threshold]
+        
+        if len(valid_matches) > 0:
+            # If both similarity and distance conditions are met
+            target_idx = valid_matches[np.argmin(distances[distances <= dist_threshold])]
+            correspondences.append([src_idx, target_idx])
+            labels[src_idx] = 1
+        else:
+            # If only the distance condition is met with relaxed threshold
+            relaxed_distances = np.linalg.norm(xyz_0_transformed[src_idx] - xyz_1, axis=1)
+            if np.min(relaxed_distances) <= dist_threshold * 1.5:  # Relaxed threshold
+                target_idx = np.argmin(relaxed_distances)
+                correspondences.append([src_idx, target_idx])
+                labels[src_idx] = 0  # Relaxed match
+
+    return {'corr': np.array(correspondences), 'labels': labels}
+
+def compute_correspondences(feat_0, feat_1, xyz_0, xyz_1, gt_pose, feat_threshold=0.8, dist_threshold=0.05, relaxed_dist_threshold=0.1):
+    # Apply GT pose to transform xyz_0 into target frame
+    xyz_0_transformed = (gt_pose[:3, :3] @ xyz_0.T + gt_pose[:3, 3:4]).T
+    
+    # Initialize correspondence and label arrays
+    corr = np.zeros((len(xyz_0), 2), dtype=int)
+    labels = np.zeros(len(xyz_0), dtype=int)
+    
+    # Create a KDTree for the target point cloud for fast nearest-neighbor search
+    tree = cKDTree(xyz_1)
+    
+    for i, (feat_src, point_src_trans) in enumerate(zip(feat_0, xyz_0_transformed)):
+        # Find the nearest neighbor in target for each transformed source point
+        dist, j = tree.query(point_src_trans)
+        
+        # Check distance threshold and feature similarity
+        feat_similarity = np.dot(feat_src, feat_1[j])
+        
+        if dist < dist_threshold and feat_similarity > feat_threshold:
+            # Both distance and feature similarity conditions are met
+            corr[i] = [i, j]
+            labels[i] = 1
+        elif dist < relaxed_dist_threshold:
+            # Only the distance condition (relaxed threshold) is met
+            corr[i] = [i, j]
+            labels[i] = 0
+
+    return corr, labels
+
 def do_single_pair_evaluation(feature_path, set_name, traj):
     result = {}
     trans_gth = np.linalg.inv(traj.pose)
@@ -31,9 +120,7 @@ def do_single_pair_evaluation(feature_path, set_name, traj):
     name_i = "%s_%03d" % (set_name, i)
     name_j = "%s_%03d" % (set_name, j)
 
-    # coord and feat form a sparse tensor.
     data_i = np.load(os.path.join(feature_path, name_i + ".npz"))
-    # points_i is the raw point cloud
     coord_i, points_i, feat_i = data_i['xyz'], data_i['points'], data_i['feature']
 
     data_j = np.load(os.path.join(feature_path, name_j + ".npz"))
@@ -45,10 +132,14 @@ def do_single_pair_evaluation(feature_path, set_name, traj):
     result['xyz_1'] = coord_j
     result['feat_0'] = feat_i
     result['feat_1'] = feat_j
-    result['pose_gt'] = trans_gth  # relative_pose: frame1->frame0
+    result['gt_pose'] = trans_gth
 
+    # Compute correspondences and labels
+    correspondences = compute_correspondences_and_labels(
+        coord_i, coord_j, feat_i, feat_j, trans_gth)
+
+    result.update(correspondences)
     return result
-
 
 if __name__ == '__main__':
     OVERLAP_RATIO = 0.3
@@ -100,7 +191,9 @@ if __name__ == '__main__':
 
         ##############################################################
         # get the paris results for 3DMatch train dataset
+        # Process each pair as before, but with correspondence and label calculations
         for idx in tqdm(range(len(files))):
+            # Load data
             file0 = os.path.join(data_root, files[idx][0])
             file1 = os.path.join(data_root, files[idx][1])
             data0 = np.load(file0)
@@ -109,6 +202,7 @@ if __name__ == '__main__':
             xyz1 = data1["pcd"]
             train_result = {}
 
+            # Prepare features as in your original code
             feats_0, feats_1 = [], []
             feats_0.append(np.ones((len(xyz0), 1)))
             feats_0 = np.hstack(feats_0)
@@ -141,22 +235,35 @@ if __name__ == '__main__':
                     feats_1, coordinates=coords_1, device=device)
                 feat1 = model(stensor_1).F.detach().cpu().numpy()
 
+            traj = read_trajectory(os.path.join(
+                source_path, set_name + "-train/gt.log"))
+            assert len(traj) > 0, "Empty trajectory file"
+            # Calculate correspondences and labels
+            corr, labels = compute_correspondences(
+                feat0, feat1, return_coords_0, return_coords_1, np.linalg.inv(traj[idx]) #########traj[idx] should be transform from source to target
+            )
+
+            # Save results
             train_result['file_0'] = os.path.basename(file0)
             train_result['file_1'] = os.path.basename(file1)
             train_result['xyz_0'] = return_coords_0
             train_result['xyz_1'] = return_coords_1
             train_result['feat_0'] = feat0
             train_result['feat_1'] = feat1
+            train_result['corr'] = corr
+            train_result['labels'] = labels
+            train_result['gt_pose'] = traj[idx]
 
-            # output
+            # Save train result to pickle
             out_name = os.path.basename(train_file).split('.')[0]
             out_path = os.path.join(out_folder, out_name)
             if not os.path.exists(out_path):
                 os.makedirs(out_path)
 
-            pcd_path = os.path.join(out_path, '%s.pkl' % idx)
+            pcd_path = os.path.join(out_path, f'{idx}.pkl')
             with open(pcd_path, 'wb') as f:
                 pickle.dump(train_result, f, pickle.HIGHEST_PROTOCOL)
+
 
         ##############################################################
         # get the paris results for 3DMatch test dataset

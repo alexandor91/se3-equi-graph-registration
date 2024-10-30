@@ -48,7 +48,7 @@ If you own dataset is ordered sequence point cloud frames, just reuse the same K
 
 For processing KITTI dataset. Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
 
-- `process_3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%.
+- `process_3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%. We use too conditions to determined the gt correspondence from source to target points, the transformed source point position distance to the target point is smaller than a threshold along with the point feature descriptors dot product similairty bigger than a threshold, label as one, otherwise, we only use point neighbouring search to find the match point pair, label as zero, 
 
 ## Training
 

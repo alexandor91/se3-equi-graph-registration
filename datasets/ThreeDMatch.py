@@ -339,7 +339,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         num_neg = self.num_node - num_pos
 
         if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
+            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
 
         if len(pos_indices) < 5:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
@@ -496,7 +496,7 @@ class ThreeDMatchTest(data.Dataset):
         num_neg = self.num_node - num_pos
 
         if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
+            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
 
 
         if len(pos_indices) < 5:

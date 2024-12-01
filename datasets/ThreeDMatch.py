@@ -179,7 +179,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         self.augment_axis = augment_axis
         self.augment_rotation = augment_rotation
         self.augment_translation = augment_translation
-        self.synthetic_pose_flag = True
+        self.synthetic_pose_flag = False
         self.normalize_use = False
 
         # Load the file list based on the split

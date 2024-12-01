@@ -327,8 +327,8 @@ class ThreeDMatchTrainVal(data.Dataset):
 
         # Sample fixed number of points
         sample_size = self.num_node
-        if sample_size > N_src or sample_size > N_tgt:
-            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        # if sample_size > N_src or sample_size > N_tgt:
+        #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
@@ -338,8 +338,8 @@ class ThreeDMatchTrainVal(data.Dataset):
         num_pos = int(self.num_node * 0.6)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
 
         if len(pos_indices) < 5:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
@@ -484,8 +484,8 @@ class ThreeDMatchTest(data.Dataset):
 
         # Sample fixed number of points
         sample_size = self.num_node
-        if sample_size > N_src or sample_size > N_tgt:
-            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        # if sample_size > N_src or sample_size > N_tgt:
+        #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
@@ -495,8 +495,8 @@ class ThreeDMatchTest(data.Dataset):
         num_pos = int(self.num_node * 0.6)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating sampling will be used!")
 
 
         if len(pos_indices) < 5:

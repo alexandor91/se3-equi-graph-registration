@@ -800,11 +800,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 
         # print("$$$$ iteration runing loss $$$$$")
         # print(running_loss)
-    # Print loss for every log_interval batches
-    if (batch_idx+1) % log_interval == 0:
-        print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.6f}')
+        # Print loss for every log_interval batches
+        if (batch_idx+1) % log_interval == 0:
+            print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.6f}')
 
-        # Log the average loss for this epoch
+            # Log the average loss for this epoch
         # writer.add_scalar('Loss/train', avg_loss, epoch)
 
     # Return the average losses over the entire validation dataset
@@ -1039,9 +1039,9 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         if (epoch + 1) % 1 == 0:
             val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, epoch, writer, use_pointnet)
             print(val_loss)
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.6f}, Validation Loss: {val_loss:.6f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}, Validation Avg Loss: {val_loss:.6f}')
         else:
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.6f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}')
 
         # Save the checkpoint if the validation loss is the best so far
         if val_loss < best_val_loss:

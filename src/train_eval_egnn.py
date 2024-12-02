@@ -267,6 +267,7 @@ class E_GCL(nn.Module):
     def node_model(self, x, edge_index, edge_attr):
         row = edge_index[0]
         agg = unsorted_segment_sum(edge_attr, row, num_segments=x.size(0))
+        #agg = unsorted_segment_mean(edge_attr, row, num_segments=x.size(0))
         out = torch.cat([x, agg], dim=1)
         out = self.node_mlp(out)
         if self.residual:
@@ -277,7 +278,7 @@ class E_GCL(nn.Module):
         row = edge_index[0]
         trans = coord_diff * self.coord_mlp(edge_feat)
         agg = unsorted_segment_sum(trans, row, num_segments=coord.size(0))
-        #agg = unsorted_segment_mean(trans, row, num_segments=coord.size(0))
+        # agg = unsorted_segment_mean(trans, row, num_segments=coord.size(0))
         coord = coord + agg
         return coord
 
@@ -628,8 +629,8 @@ class CrossAttentionPoseRegression(nn.Module):
         compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)
         compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)
 
-        compressed_h_src_norm = F.normalize(self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1), p=2, dim=-1)
-        compressed_h_tgt_norm = F.normalize(self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1), p=2, dim=-1)
+        compressed_h_src_norm = F.normalize(compressed_h_src, p=2, dim=-1)
+        compressed_h_tgt_norm = F.normalize(compressed_h_tgt, p=2, dim=-1)
 
         # Compute similarity matrix (dot product)
         sim_matrix = torch.mm(compressed_h_src_norm, compressed_h_tgt_norm.t())  # Shape: [128, 128]
@@ -656,6 +657,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # The pose consists of a quaternion (4D) and a translation (3D)
         quaternion = pose[:4]  # Shape: [4]
+        quaternion = F.normalize(quaternion, p=2, dim=-1) # Normalize the quaternion
         translation = pose[4:]  # Shape: [3]
         return quaternion, translation, total_corr_loss
     
@@ -673,7 +675,6 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     - Total loss combining quaternion and translation loss.
     """    
     # # Convert ground truth rotation matrix to quaternion
-    # gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [3x3] to [4]
     # gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)
     # # Normalize the predicted quaternion
     # pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)
@@ -690,6 +691,7 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     # Extract ground truth translation and rotation
     gt_translation = gt_pose[:3, 3]
     gt_rotation = gt_pose[:3, :3]
+    gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [3x3] to [4]
     
     # Convert predicted quaternion to rotation matrix
     pred_rotation = quaternion_to_matrix(pred_quaternion, device=pred_quaternion.device)
@@ -701,20 +703,21 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
    
     # Compute geodesic rotation loss
     rotation_loss = torch.arccos(torch.clamp((torch.trace(torch.matmul(pred_rotation.T, gt_rotation)) - 1) / 2, min=-1, max=1))
-        
     # Translation loss
     huber_loss = nn.HuberLoss(delta=delta)
     translation_loss = huber_loss(pred_translation, gt_translation)
-    
+
     # Combined loss
-    total_loss = rotation_loss   #######+ translation_loss
+    total_loss = rotation_loss + translation_loss
     
     return total_loss    
 
 # Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=5, beta=0.1):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=1, beta=0.1):
     model.train()
     running_loss = 0.0
+    running_corr_loss = 0.0  # Track correspondence rank loss
+    running_pose_loss = 0.0  # Track pose loss
 
     for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
         # Check if any returned data is None, and skip if so
@@ -792,16 +795,26 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         optimizer.step()
 
         running_loss += loss.item()
-        # Print loss for every log_interval batches
-        if (batch_idx+1) % log_interval == 0:
-            print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.4f}')
-        avg_loss = running_loss / len(dataloader)
-        print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
-        print(avg_loss)
+        running_pose_loss += pose_losses.item()
+        running_corr_loss += corr_loss.item()
+
+        # print("$$$$ iteration runing loss $$$$$")
+        # print(running_loss)
+    # Print loss for every log_interval batches
+    if (batch_idx+1) % log_interval == 0:
+        print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.6f}')
+
         # Log the average loss for this epoch
         # writer.add_scalar('Loss/train', avg_loss, epoch)
-        
-        return avg_loss
+
+    # Return the average losses over the entire validation dataset
+    avg_loss = running_loss / len(dataloader)
+    avg_pose_loss = running_pose_loss / len(dataloader)
+    avg_corr_loss = running_corr_loss / len(dataloader)
+
+    print(f'Training Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
+
+    return avg_loss
 
 
 # Function to validate the model on the validation set
@@ -891,7 +904,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
         avg_pose_loss = running_pose_loss / len(dataloader)
         avg_corr_loss = running_corr_loss / len(dataloader)
 
-    print(f'Validation Loss: {avg_loss:.4f} | Pose Loss: {avg_pose_loss:.4f} | Correspondence Loss: {avg_corr_loss:.4f}')
+    print(f'Validation Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
 
     # # Log validation losses
     # writer.add_scalar('Loss/validation', avg_loss, epoch)
@@ -1026,18 +1039,18 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         if (epoch + 1) % 1 == 0:
             val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, epoch, writer, use_pointnet)
             print(val_loss)
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.6f}, Validation Loss: {val_loss:.6f}')
         else:
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.4f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Training Loss: {train_loss:.6f}')
 
         # Save the checkpoint if the validation loss is the best so far
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, save_path, is_best=True, use_pointnet=use_pointnet)
-            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.4f}')
+            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.6f}')
 
         # Save checkpoint every 16 epochs
-        if (epoch + 1) % 16 == 0 or (epoch + 1) == num_epochs:
+        if (epoch + 1) % 20 == 0 or (epoch + 1) == num_epochs:
             checkpoint_path = save_path  #"./checkpoints"
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
@@ -1135,7 +1148,7 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
     avg_pose_loss = total_pose_loss / num_batches
     avg_corr_loss = total_corr_loss / num_batches
 
-    print(f"Evaluation completed. Avg Loss: {avg_loss:.4f}, Avg Pose Loss: {avg_pose_loss:.4f}, Avg Corr Loss: {avg_corr_loss:.4f}")
+    print(f"Evaluation completed. Avg Loss: {avg_loss:.6f}, Avg Pose Loss: {avg_pose_loss:.6f}, Avg Corr Loss: {avg_corr_loss:.6f}")
     return avg_loss, avg_pose_loss, avg_corr_loss
 
 def get_args():
@@ -1154,7 +1167,7 @@ def get_args():
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=5, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
-    parser.add_argument('--lossBeta', type=float, default=0.05, help='Correspondence loss weights')
+    parser.add_argument('--lossBeta', type=float, default=0.1, help='Correspondence loss weights')
     parser.add_argument('--savepath', type=str, default='./checkpoints/model_checkpoint.pth', help='Path to the dataset')
 
     return parser.parse_args()

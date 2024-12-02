@@ -692,7 +692,10 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     gt_translation = gt_pose[:3, 3]
     gt_rotation = gt_pose[:3, :3]
     gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [3x3] to [4]
-    
+    # Normalize the ground truth quaternion
+    gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)
+    # Normalize the predicted quaternion
+    pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)    
     # Convert predicted quaternion to rotation matrix
     pred_rotation = quaternion_to_matrix(pred_quaternion, device=pred_quaternion.device)
     
@@ -792,6 +795,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 
         # # Backward pass and optimization step
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         running_loss += loss.item()
@@ -1017,7 +1021,9 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         log_interval (int): Interval for logging the training progress.
         save_path (str): Path to save the model checkpoints.
     """
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     best_val_loss = float('inf')  # Track the best validation loss
 
     # If using PointNet encoder, initialize it separately
@@ -1157,7 +1163,7 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=0.0001, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=2e-5, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')

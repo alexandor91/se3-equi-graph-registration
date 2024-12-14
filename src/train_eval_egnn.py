@@ -708,7 +708,18 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     rotation_loss = torch.arccos(torch.clamp((torch.trace(torch.matmul(pred_rotation.T, gt_rotation)) - 1) / 2, min=-1, max=1))
     # Translation loss
     huber_loss = nn.HuberLoss(delta=delta)
-    translation_loss = huber_loss(pred_translation, gt_translation)
+    # Compute the dot product along the last dimension
+    dot_product = torch.sum(pred_translation * gt_translation, dim=-1)  # Shape: [2]
+
+    # Compute the L2 norm of each vector
+    norm_vec1 = torch.norm(pred_translation, dim=-1)  # Shape: [2]
+    norm_vec2 = torch.norm(gt_translation, dim=-1)  # Shape: [2]
+
+    # Compute the cosine similarity
+    cosine_similarity = dot_product / (norm_vec1 * norm_vec2)  # Shape: [2]
+
+    translation_loss = torch.arccos(torch.clamp(cosine_similarity, min=-1, max=1))
+    # translation_loss = huber_loss(pred_translation, gt_translation)
 
     # Combined loss
     total_loss = rotation_loss + translation_loss
@@ -1206,7 +1217,7 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=2e-5, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
@@ -1216,7 +1227,7 @@ def get_args():
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=5, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
-    parser.add_argument('--lossBeta', type=float, default=0.1, help='Correspondence loss weights')
+    parser.add_argument('--lossBeta', type=float, default=0.01, help='Correspondence loss weights')
     parser.add_argument('--savepath', type=str, default='./checkpoints/model_checkpoint.pth', help='Path to the dataset')
 
     return parser.parse_args()

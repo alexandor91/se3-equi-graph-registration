@@ -554,7 +554,9 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # MLP layers to compress the input from 2048 points to 128 points
         self.mlp_compress = nn.Sequential(
-            nn.Linear(num_nodes, num_nodes//4),  # Compress to 128 points
+            nn.Linear(num_nodes, num_nodes//2),  # Compress to 128 points
+            nn.ReLU(),
+            nn.Linear(num_nodes//2, num_nodes//4),  # Compress to 128 points
             nn.ReLU(),
             nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
         )
@@ -562,13 +564,28 @@ class CrossAttentionPoseRegression(nn.Module):
         # MLP for pose regression (quaternion + translation)
         self.mlp_pose = nn.Sequential(
             nn.Linear(128 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(256, 128),  # Intermediate layer
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(128, 64),  # Intermediate layer
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(64, 7)  # Output quaternion (4) + translation (3)
         )
+        # Initialize the weights using Xavier initialization
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        def init_layer(layer):
+            if isinstance(layer, nn.Linear):
+                # Xavier uniform initialization
+                nn.init.xavier_uniform_(layer.weight)
+                # Initialize biases to zero
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
+        # Apply Xavier initialization to both MLPs
+        self.mlp_compress.apply(init_layer)
+        self.mlp_pose.apply(init_layer)
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
         # Move everything to the same device (GPU/CPU)
@@ -599,9 +616,10 @@ class CrossAttentionPoseRegression(nn.Module):
         if labels.dim() == 2 and labels.size(0) == 1:
             labels = labels.squeeze(0)
 
-        # Process source and target point clouds with the EGNN
-        h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
-        h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
+        # # Process source and target point clouds with the EGNN
+        
+        # h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
+        # h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
 
         # Concatenate node features with coordinates
         h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
@@ -612,6 +630,10 @@ class CrossAttentionPoseRegression(nn.Module):
         h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
 
         large_sim_matrix = torch.mm(h_src_norm, h_tgt_norm.t())  # Shape: [num_nodes, num_nodes]
+        large_sim_matrix = torch.nn.functional.softmax(large_sim_matrix, dim=1)
+        # ul, sl, vl = torch.svd(large_sim_matrix)
+
+
         # print(large_sim_matrix.shape)
         # print(corr.shape)
         # print(labels.shape)
@@ -620,6 +642,8 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # Get similarity at correspondence indices
         corr_similarity = large_sim_matrix[corr_indices]  # Get correspondence similarity values
+        tgt_indices = large_sim_matrix.argmax(dim=1)
+        h_tgt = h_tgt[tgt_indices]
         # print(corr_similarity.shape)
 
         # Correspondence loss computation
@@ -634,20 +658,20 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # Compute similarity matrix (dot product)
         sim_matrix = torch.mm(compressed_h_src_norm, compressed_h_tgt_norm.t())  # Shape: [128, 128]
-
+        sim_matrix = torch.nn.functional.softmax(sim_matrix, dim=1)
         # Further compute rank loss for compressed similarity matrix
         u, s, v = torch.svd(sim_matrix)
         rank_loss = F.mse_loss(s[:128], torch.ones(128).cuda())  # Rank close to 128
 
-        # Correspondence loss: Combine similarity-based loss and rank loss
-        total_corr_loss = corr_loss + rank_loss
+        # Correspondence loss: Combine similarity-based loss and rank loss # rank_loss
+        total_corr_loss = rank_loss + corr_loss     
 
         # Weigh the source and target descriptors using the similarity matrix
-        weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src_norm)  # Shape: [128, 35]
-        weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt_norm)  # Shape: [128, 35]
+        weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
+        weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
         # Concatenate the source and target weighted features
-        combined_features = torch.cat([weighted_h_src, weighted_h_tgt], dim=-1)  # Shape: [128, 70]
+        combined_features = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: [128, 70]
 
         # Flatten the combined features for pose regression
         combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
@@ -722,16 +746,18 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     # translation_loss = huber_loss(pred_translation, gt_translation)
 
     # Combined loss
-    total_loss = rotation_loss + translation_loss
+    # print(f"pose loss , rot loss {rotation_loss}, trans loss {translation_loss}!")
+    # total_loss = rotation_loss + translation_loss
     
-    return total_loss    
+    return rotation_loss, translation_loss    
 
 # Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=1, beta=0.1):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=1, beta=1):
     model.train()
     running_loss = 0.0
     running_corr_loss = 0.0  # Track correspondence rank loss
-    running_pose_loss = 0.0  # Track pose loss
+    running_rot_loss = 0.0  # Track pose rot loss
+    running_trans_loss = 0.0  # Track pose trans loss
 
     for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
         # Check if any returned data is None, and skip if so
@@ -745,8 +771,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
         xyz_0_center = src_pts.mean(dim=1, keepdim=True).to(device)
         xyz_1_center = tar_pts.mean(dim=1, keepdim=True).to(device)
-        xyz_0 = xyz_0 - xyz_0_center
-        xyz_1 = xyz_1 - xyz_1_center
+        xyz_0 = xyz_0 #- xyz_0_center
+        xyz_1 = xyz_1 #- xyz_1_center
         scale1 = xyz_0.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
         scale2 = xyz_1.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
         # xyz_0 = xyz_0 / scale1
@@ -765,10 +791,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # Ensure T is of shape [1, 3, 1]
         T = T.unsqueeze(-1)  # From [1, 3] -> [1, 3, 1]
 
-        # Perform the computation
-        T_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center)).to(device)  # Result shape: [1, 3, 1]
-        gt_pose[:, :3, :3] = R
-        gt_pose[:, :3, 3] = T_norm.transpose(1, 2)
+        # # Perform the pose norm computation
+        # T_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center)).to(device)  # Result shape: [1, 3, 1]
+        # gt_pose[:, :3, :3] = R
+        # gt_pose[:, :3, 3] = T_norm.transpose(1, 2)
+
         # T = T.squeeze(-1)  # Shape: [B, 3] -> T is already [B, 3, 1], no need for transpose.
         # T = T.transpose(1, 2) 
         # print(R.shape)
@@ -796,7 +823,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # # print(feat_1)
         # print(xyz_diff)
         # Initialize KNN graphs for source and target point clouds
-        k = 12
+        k = 16
         ####### remove the batch size when it is one ##############
         # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
         if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
@@ -842,18 +869,20 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         #corr_loss
 
         # # Compute pose loss
-        pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
+        rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
         # # Combine pose and correspondence loss
-        loss = pose_losses + beta*corr_loss
+        loss = rot_loss + trans_loss + beta*corr_loss
 
         # # Backward pass and optimization step
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        ########### clip gradients #################
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         running_loss += loss.item()
-        running_pose_loss += pose_losses.item()
+        running_rot_loss += rot_loss.item()
+        running_trans_loss += trans_loss.item()
         running_corr_loss += corr_loss.item()
 
         # print("$$$$ iteration runing loss $$$$$")
@@ -865,12 +894,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
             # Log the average loss for this epoch
         # writer.add_scalar('Loss/train', avg_loss, epoch)
 
-    # Return the average losses over the entire validation dataset
+    # Return the average losses over the entire train dataset
     avg_loss = running_loss / len(dataloader)
-    avg_pose_loss = running_pose_loss / len(dataloader)
+    avg_rot_loss = running_rot_loss / len(dataloader)
+    avg_trans_loss = running_trans_loss / len(dataloader)
     avg_corr_loss = running_corr_loss / len(dataloader)
-
-    print(f'Training Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
+    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
 
     return avg_loss
 
@@ -878,9 +907,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 # Function to validate the model on the validation set
 def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
     model.eval()  # Set model to evaluation mode
-    running_loss = 0.0  # Track overall loss
+    running_loss = 0.0
     running_corr_loss = 0.0  # Track correspondence rank loss
-    running_pose_loss = 0.0  # Track pose loss
+    running_rot_loss = 0.0  # Track pose rot loss
+    running_trans_loss = 0.0  # Track pose trans loss
 
     with torch.no_grad():  # No need to track gradients during validation
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
@@ -947,28 +977,29 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             #corr_loss
 
             # # Compute pose loss
-            pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
+            rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # # Combine pose and correspondence loss
-            loss = pose_losses + beta*corr_loss
+            loss = rot_loss + trans_loss + beta*corr_loss
 
             # Accumulate losses
             running_loss += loss.item()
-            running_pose_loss += pose_losses.item()
+            running_rot_loss += rot_loss.item()
+            running_trans_loss += trans_loss.item()
             running_corr_loss += corr_loss.item()
 
         # Return the average losses over the entire validation dataset
         avg_loss = running_loss / len(dataloader)
-        avg_pose_loss = running_pose_loss / len(dataloader)
+        avg_rot_loss = running_rot_loss / len(dataloader)
+        avg_trans_loss = running_trans_loss / len(dataloader)
         avg_corr_loss = running_corr_loss / len(dataloader)
 
-    print(f'Validation Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
-
+    print(f'Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
     # # Log validation losses
     # writer.add_scalar('Loss/validation', avg_loss, epoch)
     # writer.add_scalar('Pose_Loss/validation', avg_pose_loss, epoch)
     # writer.add_scalar('Correspondence_Loss/validation', avg_corr_loss, epoch)
-
+    avg_pose_loss = avg_rot_loss + avg_trans_loss
     return avg_loss, avg_pose_loss, avg_corr_loss
 
 # Save the checkpoint
@@ -1075,9 +1106,9 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         log_interval (int): Interval for logging the training progress.
         save_path (str): Path to save the model checkpoints.
     """
-    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     best_val_loss = float('inf')  # Track the best validation loss
 
     # If using PointNet encoder, initialize it separately
@@ -1217,7 +1248,7 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
@@ -1225,9 +1256,9 @@ def get_args():
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
     parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
-    parser.add_argument('--n_layers', type=int, default=5, help='Number of layers in EGNN')
+    parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
-    parser.add_argument('--lossBeta', type=float, default=0.01, help='Correspondence loss weights')
+    parser.add_argument('--lossBeta', type=float, default=0.1, help='Correspondence loss weights')
     parser.add_argument('--savepath', type=str, default='./checkpoints/model_checkpoint.pth', help='Path to the dataset')
 
     return parser.parse_args()

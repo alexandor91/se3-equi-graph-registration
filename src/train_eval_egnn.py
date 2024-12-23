@@ -3,6 +3,7 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 # from egnn_pytorch import EGNN
 # import egcnModel
@@ -545,7 +546,7 @@ def center_and_normalize(src_pts, tar_pts):
    return src_pts_normalized, tar_pts_normalized
 
 class CrossAttentionPoseRegression(nn.Module):
-    def __init__(self, egnn: EGNN, num_nodes: int = 2048, hidden_nf: int = 35, device='cuda:0'):
+    def __init__(self, egnn: EGNN, num_nodes: int = 2048, hidden_nf: int = 32, device='cuda:0'):
         super(CrossAttentionPoseRegression, self).__init__()
         self.egnn = egnn  # The shared EGNN network
         self.hidden_nf = hidden_nf  # Hidden feature dimension (35)
@@ -564,11 +565,16 @@ class CrossAttentionPoseRegression(nn.Module):
         # MLP for pose regression (quaternion + translation)
         self.mlp_pose = nn.Sequential(
             nn.Linear(128 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
-            nn.Tanh(),
+            nn.ReLU(),
+            # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(256, 128),  # Intermediate layer
-            nn.Tanh(),
+            nn.ReLU(),
+            # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(128, 64),  # Intermediate layer
-            nn.Tanh(),
+            nn.ReLU(),
+            # nn.Linear(64, 32),  # Intermediate layer
+            # nn.ReLU(),
+            # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(64, 7)  # Output quaternion (4) + translation (3)
         )
         # Initialize the weights using Xavier initialization
@@ -622,8 +628,10 @@ class CrossAttentionPoseRegression(nn.Module):
         # h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
 
         # Concatenate node features with coordinates
-        h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
-        h_tgt = torch.cat([h_tgt, x_tgt], dim=-1)  # Shape: [2048, 35]
+        # h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
+        # h_tgt = torch.cat([h_tgt, x_tgt], dim=-1)  # Shape: [2048, 35]
+        h_src = torch.cat([h_src], dim=-1)  # Shape: [2048, 35]
+        h_tgt = torch.cat([h_tgt], dim=-1)  # Shape: [2048, 35]
 
         # Normalize features for Hadamard product (L2 normalization)
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
@@ -1107,6 +1115,12 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         save_path (str): Path to save the model checkpoints.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # Create Adam optimizer with weight decay
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.05, eps=1e-15)
+
+    # Scheduler for decaying the learning rate every 15 epochs
+    scheduler = StepLR(optimizer, step_size=15, gamma=0.1)  # Gamma defines the decay factor
+
     # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
     # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     best_val_loss = float('inf')  # Track the best validation loss
@@ -1125,6 +1139,13 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         # Train for one epoch
         print(f'\nEpoch {epoch + 1}/{num_epochs}')
         train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta)
+        
+        # Step the scheduler
+        scheduler.step()
+
+        # Print current learning rate for monitoring
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"Epoch {epoch+1}/{num_epochs}, Current LR: {current_lr}")
 
         # Validate every few epochs (e.g., every 5 epochs)
         if (epoch + 1) % 1 == 0:
@@ -1248,13 +1269,13 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')

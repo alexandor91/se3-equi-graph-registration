@@ -628,10 +628,10 @@ class CrossAttentionPoseRegression(nn.Module):
         # h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
 
         # Concatenate node features with coordinates
-        # h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
-        # h_tgt = torch.cat([h_tgt, x_tgt], dim=-1)  # Shape: [2048, 35]
-        h_src = torch.cat([h_src], dim=-1)  # Shape: [2048, 35]
-        h_tgt = torch.cat([h_tgt], dim=-1)  # Shape: [2048, 35]
+        h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
+        h_tgt = torch.cat([h_tgt, x_tgt], dim=-1)  # Shape: [2048, 35]
+        # h_src = torch.cat([h_src], dim=-1)  # Shape: [2048, 35]
+        # h_tgt = torch.cat([h_tgt], dim=-1)  # Shape: [2048, 35]
 
         # Normalize features for Hadamard product (L2 normalization)
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
@@ -1275,7 +1275,7 @@ def get_args():
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')

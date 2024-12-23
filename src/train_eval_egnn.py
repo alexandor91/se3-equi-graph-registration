@@ -651,30 +651,36 @@ class CrossAttentionPoseRegression(nn.Module):
         # Get similarity at correspondence indices
         corr_similarity = large_sim_matrix[corr_indices]  # Get correspondence similarity values
         tgt_indices = large_sim_matrix.argmax(dim=1)
-        h_tgt = h_tgt[tgt_indices]
+        new_h_tgt = h_tgt[tgt_indices]
         # print(corr_similarity.shape)
 
         # Correspondence loss computation
-        corr_loss = F.mse_loss(corr_similarity, labels*torch.ones_like(corr_similarity).cuda())  # Correspondence should be close to 1
+        corr_loss = F.mse_loss(corr_similarity, labels * torch.ones_like(corr_similarity).cuda()) # Correspondence should be close to 1
 
         # Compress features to 128 dimensions
         compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)
-        compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)
+        compressed_h_tgt = self.mlp_compress(new_h_tgt.transpose(0, 1)).transpose(0, 1)
 
+        # Normalize compressed features
         compressed_h_src_norm = F.normalize(compressed_h_src, p=2, dim=-1)
         compressed_h_tgt_norm = F.normalize(compressed_h_tgt, p=2, dim=-1)
 
-        # Compute similarity matrix (dot product)
+        # Compute compressed similarity matrix
         sim_matrix = torch.mm(compressed_h_src_norm, compressed_h_tgt_norm.t())  # Shape: [128, 128]
-        sim_matrix = torch.nn.functional.softmax(sim_matrix, dim=1)
-        # Further compute rank loss for compressed similarity matrix
+        sim_matrix = F.softmax(sim_matrix, dim=1)
+
+        # Rank loss on compressed similarity matrix
         u, s, v = torch.svd(sim_matrix)
-        rank_loss = F.mse_loss(s[:128], torch.ones(128).cuda())  # Rank close to 128
+        # rank_loss = F.mse_loss(s[:128], torch.ones(128).cuda())  # Target rank is 128
+        # Calculate the trace (sum of diagonal elements) of the similarity matrix
+        trace_sum = torch.trace(sim_matrix)  # Sum of diagonal elements
 
-        # Correspondence loss: Combine similarity-based loss and rank loss # rank_loss
-        total_corr_loss = rank_loss + corr_loss     
+        # Rank loss using the trace
+        rank_loss = 1e-2*F.mse_loss(trace_sum, torch.tensor(35.0).cuda())  # Target trace is 128
 
-        # Weigh the source and target descriptors using the similarity matrix
+        # Total correspondence loss
+        total_corr_loss = corr_loss + rank_loss        # Weigh the source and target descriptors using the similarity matrix
+
         weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
         weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
@@ -942,7 +948,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             # print(feat_1.shape)
     
             # Initialize KNN graphs for source and target point clouds
-            k = 12
+            k = 16
             ####### remove the batch size when it is one ##############
             # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
             if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
@@ -1116,7 +1122,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     # Create Adam optimizer with weight decay
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.05, eps=1e-15)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Scheduler for decaying the learning rate every 15 epochs
     scheduler = StepLR(optimizer, step_size=15, gamma=0.1)  # Gamma defines the decay factor
@@ -1269,7 +1275,7 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')

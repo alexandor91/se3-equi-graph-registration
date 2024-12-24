@@ -622,10 +622,12 @@ class CrossAttentionPoseRegression(nn.Module):
         if labels.dim() == 2 and labels.size(0) == 1:
             labels = labels.squeeze(0)
 
-        # # Process source and target point clouds with the EGNN
-        
+
         # h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
         # h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
+        # Normalize features for Hadamard product (L2 normalization)
+        h_src_norm = F.normalize(h_src, p=2, dim=-1)
+        h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
 
         # Concatenate node features with coordinates
         h_src = torch.cat([h_src, x_src], dim=-1)  # Shape: [2048, 35]
@@ -633,9 +635,9 @@ class CrossAttentionPoseRegression(nn.Module):
         # h_src = torch.cat([h_src], dim=-1)  # Shape: [2048, 35]
         # h_tgt = torch.cat([h_tgt], dim=-1)  # Shape: [2048, 35]
 
-        # Normalize features for Hadamard product (L2 normalization)
-        h_src_norm = F.normalize(h_src, p=2, dim=-1)
-        h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
+        # # Normalize features for Hadamard product (L2 normalization)
+        # h_src_norm_new = F.normalize(h_src, p=2, dim=-1)
+        # h_tgt_norm_new = F.normalize(h_tgt, p=2, dim=-1)
 
         large_sim_matrix = torch.mm(h_src_norm, h_tgt_norm.t())  # Shape: [num_nodes, num_nodes]
         large_sim_matrix = torch.nn.functional.softmax(large_sim_matrix, dim=1)
@@ -649,6 +651,7 @@ class CrossAttentionPoseRegression(nn.Module):
         # print(corr[:, 0].long())
 
         # Get similarity at correspondence indices
+        corr_similarity = torch.zeros_like(large_sim_matrix)  # Shape: [2048, 2048]
         corr_similarity = large_sim_matrix[corr_indices]  # Get correspondence similarity values
         tgt_indices = large_sim_matrix.argmax(dim=1)
         new_h_tgt = h_tgt[tgt_indices]
@@ -673,13 +676,15 @@ class CrossAttentionPoseRegression(nn.Module):
         u, s, v = torch.svd(sim_matrix)
         # rank_loss = F.mse_loss(s[:128], torch.ones(128).cuda())  # Target rank is 128
         # Calculate the trace (sum of diagonal elements) of the similarity matrix
-        trace_sum = torch.trace(sim_matrix)  # Sum of diagonal elements
+        # Get the top 35 singular values and sum them
+        top_k_sum = torch.sum(s[:35])  # Sum of the top 35 singular values
 
-        # Rank loss using the trace
-        rank_loss = 1e-2*F.mse_loss(trace_sum, torch.tensor(35.0).cuda())  # Target trace is 128
+        # Rank loss: Compare the sum of top 35 singular values to the target value 35
+        rank_loss = 1e-2 * F.mse_loss(top_k_sum, torch.tensor(35.0).cuda())  # Target sum is 35
+
 
         # Total correspondence loss
-        total_corr_loss = corr_loss + rank_loss        # Weigh the source and target descriptors using the similarity matrix
+        total_corr_loss = rank_loss        # Weigh the source and target descriptors using the similarity matrix
 
         weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
         weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]

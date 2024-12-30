@@ -466,38 +466,66 @@ def rotation_matrix_to_quaternion(rotation_matrix):
 
     return quaternion
 
-def quaternion_to_matrix(quaternion, device):
+# def quaternion_to_matrix(quaternion, device):
+    # """
+    # Converts a quaternion into a 3x3 rotation matrix, ensuring the operation runs on the specified device.
+    
+    # Args:
+    #     quaternion (torch.Tensor): A tensor of shape (4,) representing (w, x, y, z).
+    #     device (torch.device): The device (e.g., 'cuda' or 'cpu') on which the operation should run.
+        
+    # Returns:
+    #     torch.Tensor: A 3x3 rotation matrix on the specified device.
+    # """
+    # w, x, y, z = quaternion
+
+    # # Ensure all operations are done on the correct device
+    # r00 = 1 - 2 * (y ** 2 + z ** 2)
+    # r01 = 2 * (x * y - z * w)
+    # r02 = 2 * (x * z + y * w)
+
+    # r10 = 2 * (x * y + z * w)
+    # r11 = 1 - 2 * (x ** 2 + z ** 2)
+    # r12 = 2 * (y * z - x * w)
+
+    # r20 = 2 * (x * z - y * w)
+    # r21 = 2 * (y * z + x * w)
+    # r22 = 1 - 2 * (x ** 2 + y ** 2)
+
+    # # Create the 3x3 rotation matrix on the correct device
+    # rotation_matrix = torch.tensor([[r00, r01, r02],
+    #                                 [r10, r11, r12],
+    #                                 [r20, r21, r22]], device=device)
+
+    # return rotation_matrix
+
+def quaternion_to_matrix(quaternion):
     """
-    Converts a quaternion into a 3x3 rotation matrix, ensuring the operation runs on the specified device.
+    Converts a quaternion into a 3x3 rotation matrix.
     
     Args:
         quaternion (torch.Tensor): A tensor of shape (4,) representing (w, x, y, z).
-        device (torch.device): The device (e.g., 'cuda' or 'cpu') on which the operation should run.
         
     Returns:
-        torch.Tensor: A 3x3 rotation matrix on the specified device.
+        torch.Tensor: A 3x3 rotation matrix.
     """
-    w, x, y, z = quaternion
-
-    # Ensure all operations are done on the correct device
-    r00 = 1 - 2 * (y ** 2 + z ** 2)
-    r01 = 2 * (x * y - z * w)
-    r02 = 2 * (x * z + y * w)
-
-    r10 = 2 * (x * y + z * w)
-    r11 = 1 - 2 * (x ** 2 + z ** 2)
-    r12 = 2 * (y * z - x * w)
-
-    r20 = 2 * (x * z - y * w)
-    r21 = 2 * (y * z + x * w)
-    r22 = 1 - 2 * (x ** 2 + y ** 2)
-
-    # Create the 3x3 rotation matrix on the correct device
-    rotation_matrix = torch.tensor([[r00, r01, r02],
-                                    [r10, r11, r12],
-                                    [r20, r21, r22]], device=device)
-
-    return rotation_matrix
+    # print("$$$$$$$$$$$$")
+    # print(quaternion.shape)
+    w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
+    
+    # Compute the individual terms for the rotation matrix
+    ww, xx, yy, zz = w * w, x * x, y * y, z * z
+    wx, wy, wz = w * x, w * y, w * z
+    xy, xz, yz = x * y, x * z, y * z
+    
+    # Build the rotation matrix
+    rot_matrix = torch.tensor([
+        [ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)],
+        [2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)],
+        [2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz]
+    ]).to(quaternion.device)
+    
+    return rot_matrix
 
 def matrix_log(R):
     """
@@ -561,22 +589,31 @@ class CrossAttentionPoseRegression(nn.Module):
             nn.ReLU(),
             nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
         )
-
-        # MLP for pose regression (quaternion + translation)
         self.mlp_pose = nn.Sequential(
             nn.Linear(128 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
             nn.ReLU(),
             # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(256, 128),  # Intermediate layer
             nn.ReLU(),
-            # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(128, 64),  # Intermediate layer
             nn.ReLU(),
-            # nn.Linear(64, 32),  # Intermediate layer
-            # nn.ReLU(),
-            # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(64, 7)  # Output quaternion (4) + translation (3)
         )
+
+        self.shared_mlp_decoder = nn.Sequential(
+            nn.Linear((32+3)*2, 128),  # Compress to 128 points
+            nn.ReLU(),
+            nn.Linear(128, 64),  # Compress to 128 points
+            nn.ReLU(),
+        )
+        self.shallow_mlp_pose = nn.Sequential(
+            nn.Linear(64, 32),  # Compress to 128 points
+            nn.ReLU(),
+            nn.Linear(32, 7),  # Compress to 128 points
+        )
+        self.global_pooling = nn.AdaptiveMaxPool1d(1)
+        self.mean_pooling = nn.AdaptiveAvgPool1d(1)
+        # MLP for pose regression (quaternion + translation)
         # Initialize the weights using Xavier initialization
         self.initialize_weights()
 
@@ -592,6 +629,8 @@ class CrossAttentionPoseRegression(nn.Module):
         # Apply Xavier initialization to both MLPs
         self.mlp_compress.apply(init_layer)
         self.mlp_pose.apply(init_layer)
+        self.shared_mlp_decoder.apply(init_layer)
+        self.shallow_mlp_pose.apply(init_layer)
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
         # Move everything to the same device (GPU/CPU)
@@ -700,31 +739,78 @@ class CrossAttentionPoseRegression(nn.Module):
         # Rank loss: Compare the sum of top 35 singular values to the target value 35
         rank_loss = F.mse_loss(top_k_sum, torch.tensor(35.0).cuda())  # Target sum is 35
 
-        print("$$$$$$$")
+        # print("$$$$$$$")
         # print(s)
-        print(s)
         # print(corr_loss)
         # Total correspondence loss
-        total_corr_loss = 1e-2 * rank_loss       # Weigh the source and target descriptors using the similarity matrix
+        # total_corr_loss = 1e-2 * rank_loss       # Weigh the source and target descriptors using the similarity matrix
 
-        weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
-        weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
+        # weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
+        # weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
-        # Concatenate the source and target weighted features
-        combined_features = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: [128, 70]
+        # # Concatenate the source and target weighted features
+        # combined_features = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: [128, 70]
 
-        # Flatten the combined features for pose regression
-        combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
+        # # Flatten the combined features for pose regression
+        # combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
 
-        # Regress the pose (quaternion + translation)
-        pose = self.mlp_pose(combined_features_flat)  # Shape: [7]
-
+        # # Regress the pose (quaternion + translation)
+        # pose = self.mlp_pose(combined_features_flat)  # Shape: [7]
+        combined_features = torch.cat([h_src, h_tgt], dim=-1)  # Shape: [N, 70]
+        compressed_features = self.shared_mlp_decoder(combined_features)
+        global_features = self.global_pooling(compressed_features.T).T
+        pose = self.shallow_mlp_pose(global_features)
+        pose = pose.squeeze(0)
         # The pose consists of a quaternion (4D) and a translation (3D)
         quaternion = pose[:4]  # Shape: [4]
         quaternion = F.normalize(quaternion, p=2, dim=-1) # Normalize the quaternion
         translation = pose[4:]  # Shape: [3]
-        return quaternion, translation, total_corr_loss
+
+        labels = labels.to(x_tgt.device)
+        # print(labels.device)
+
+        return quaternion, translation, rank_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, labels
     
+def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels):
+    """
+    Args:
+        quaternion: Tensor of shape [batch_size, 4] (predicted quaternion).
+        translation: Tensor of shape [batch_size, 3] (predicted translation).
+        h_src_norm: Tensor of shape [N, 32] (source point features).
+        x_src: Tensor of shape [N, 3] (source point coordinates).
+        h_tgt_norm: Tensor of shape [N, 32] (target point features).
+        x_tgt: Tensor of shape [N, 3] (target point coordinates).
+        gt_labels: Tensor of shape [N] (ground-truth labels, 1 for correspondence, 0 otherwise).
+
+    Returns:
+        point_error: Mean L2 norm error of predicted vs target points.
+        feature_loss: Mean feature similarity loss.
+    """
+    # Ensure all tensors are on the same device
+    device = x_src.device
+    quaternion = F.normalize(quaternion.to(device), p=2, dim=-1)
+
+    # Convert quaternion to rotation matrix
+    rotation_matrix = quaternion_to_matrix(quaternion.unsqueeze(0).to(device))
+
+    # Ensure translation is on the same device
+    translation = translation.to(device)
+    rotation_matrix = rotation_matrix.to(device)
+
+    # Ensure x_src is on the same device
+    x_src = x_src.to(device)
+    # Transform source points
+    x_src_transformed = torch.matmul(rotation_matrix, x_src.T).T + translation    
+    # x_src_transformed = torch.matmul(x_src, rotation_matrix.T) + translation
+    # Compute the point error (e.g., mean L2 norm)
+    point_error = torch.mean(torch.norm(x_src_transformed - x_tgt.to(device), dim=-1))
+
+    # Compute the feature loss (e.g., using gt_labels as mask)
+    feature_loss = torch.mean(
+        torch.norm(h_src_norm.to(device)[gt_labels == 1] - h_tgt_norm.to(device)[gt_labels == 1], dim=-1)
+    )
+
+    return point_error, feature_loss
 
 def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     """
@@ -760,8 +846,9 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)
     # Normalize the predicted quaternion
     pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)    
+
     # Convert predicted quaternion to rotation matrix
-    pred_rotation = quaternion_to_matrix(pred_quaternion, device=pred_quaternion.device)
+    pred_rotation = quaternion_to_matrix(pred_quaternion.unsqueeze(0)) 
     
     # # SO(3) geodesic rotation loss
     # R = torch.matmul(pred_rotation.T, gt_rotation)
@@ -798,6 +885,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
     running_corr_loss = 0.0  # Track correspondence rank loss
     running_rot_loss = 0.0  # Track pose rot loss
     running_trans_loss = 0.0  # Track pose trans loss
+    running_point_error = 0.0
+    running_feature_consensus_error = 0.0
 
     for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
         # Check if any returned data is None, and skip if so
@@ -838,8 +927,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 
         # T = T.squeeze(-1)  # Shape: [B, 3] -> T is already [B, 3, 1], no need for transpose.
         # T = T.transpose(1, 2) 
-        # print(R.shape)
-        # print(T.shape)
         # print(xyz_0_center.shape)
         # print(gt_pose.shape)
         # # gt_pose_norm = (gt_pose - xyz_1_center + R @ xyz_0_center.T) /scale2
@@ -856,11 +943,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # # Step 3: Convert back to 3D by dropping the homogeneous coordinate
         # xyz_transformed = xyz_transformed_homo[..., :3]  # Shape: 1 x N x 3
         # xyz_diff = xyz_transformed - xyz_1
-        # print("################@@@@@@@@@@@@@@@@######################")
-        # # print(xyz_0)
-        # # print(xyz_1)
-        # # print(feat_0)
-        # # print(feat_1)
         # print(xyz_diff)
         # Initialize KNN graphs for source and target point clouds
         k = 16
@@ -904,15 +986,18 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # Zero the gradients
         optimizer.zero_grad()
 
+        xyz_0 = xyz_0 - xyz_0_center.squeeze(-1)
+        xyz_1 = xyz_1 - xyz_1_center.squeeze(-1)
+    
         # # Forward pass through the model
-        quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
+        quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
         #corr_loss
-
+        point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
         # # Compute pose loss
         rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
         # # Combine pose and correspondence loss
-        loss = rot_loss + trans_loss + beta*corr_loss
+        loss = rot_loss + point_error  # trans_loss + beta*corr_loss 
 
         # # Backward pass and optimization step
         loss.backward()
@@ -924,7 +1009,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         running_rot_loss += rot_loss.item()
         running_trans_loss += trans_loss.item()
         running_corr_loss += corr_loss.item()
-
+        running_point_error += point_error.item()
+        running_feature_consensus_error += feature_loss.item()
         # print("$$$$ iteration runing loss $$$$$")
         # print(running_loss)
         # Print loss for every log_interval batches
@@ -939,7 +1025,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
     avg_rot_loss = running_rot_loss / len(dataloader)
     avg_trans_loss = running_trans_loss / len(dataloader)
     avg_corr_loss = running_corr_loss / len(dataloader)
-    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
+    avg_point_error = running_point_error / len(dataloader)
+    avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
+
+    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f}, Feature error:  {avg_feature_consensus_error:.6f}')
 
     return avg_loss
 
@@ -951,6 +1040,8 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
     running_corr_loss = 0.0  # Track correspondence rank loss
     running_rot_loss = 0.0  # Track pose rot loss
     running_trans_loss = 0.0  # Track pose trans loss
+    running_point_error = 0.0
+    running_feature_consensus_error = 0.0
 
     with torch.no_grad():  # No need to track gradients during validation
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
@@ -1013,34 +1104,38 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
 
             # # Forward pass through the model
-            quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
+            quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
             #corr_loss
-
+            point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
             # # Compute pose loss
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # # Combine pose and correspondence loss
-            loss = rot_loss + trans_loss + beta*corr_loss
+            loss = rot_loss + point_error ########### trans_loss + beta*corr_loss
 
             # Accumulate losses
             running_loss += loss.item()
             running_rot_loss += rot_loss.item()
             running_trans_loss += trans_loss.item()
             running_corr_loss += corr_loss.item()
-
-        # Return the average losses over the entire validation dataset
+            running_point_error += point_error.item()
+            running_feature_consensus_error += feature_loss.item()
+        # Return the average losses over the entire train dataset
         avg_loss = running_loss / len(dataloader)
         avg_rot_loss = running_rot_loss / len(dataloader)
         avg_trans_loss = running_trans_loss / len(dataloader)
         avg_corr_loss = running_corr_loss / len(dataloader)
+        avg_point_error = running_point_error / len(dataloader)
+        avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
 
-    print(f'Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
+        print(f'Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f}, Feature error:  {avg_feature_consensus_error:.6f}')
     # # Log validation losses
     # writer.add_scalar('Loss/validation', avg_loss, epoch)
     # writer.add_scalar('Pose_Loss/validation', avg_pose_loss, epoch)
     # writer.add_scalar('Correspondence_Loss/validation', avg_corr_loss, epoch)
-    avg_pose_loss = avg_rot_loss + avg_trans_loss
-    return avg_loss, avg_pose_loss, avg_corr_loss
+        avg_pose_loss = avg_rot_loss + avg_trans_loss
+
+    return avg_loss, avg_pose_loss, avg_corr_loss, avg_point_error, avg_feature_consensus_error
 
 # Save the checkpoint
 def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
@@ -1181,7 +1276,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
 
         # Validate every few epochs (e.g., every 5 epochs)
         if (epoch + 1) % 1 == 0:
-            val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, epoch, writer, use_pointnet)
+            val_loss, val_pose_loss, val_corr_loss, avg_point_error, avg_feature_consensus_error = validate(model, val_loader, device, epoch, writer, use_pointnet)
             print(val_loss)
             print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}, Validation Avg Loss: {val_loss:.6f}')
         else:

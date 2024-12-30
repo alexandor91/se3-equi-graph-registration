@@ -911,7 +911,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         R = gt_pose[:, :3, :3].to(device)
         T = gt_pose[:, :3, 3].to(device)
         # Adjust xyz_0_center to match R's expected shape
-        # Ensure xyz_0_center is of shape [1, 3, 1]
+        ########### input points shift center #################
         xyz_0_center = xyz_0_center.squeeze(1).unsqueeze(-1)  # From [1, 1, 3] -> [1, 3] -> [1, 3, 1]
 
         # Ensure xyz_1_center is of shape [1, 3, 1]
@@ -986,8 +986,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # Zero the gradients
         optimizer.zero_grad()
 
-        xyz_0 = xyz_0 - xyz_0_center.squeeze(-1)
-        xyz_1 = xyz_1 - xyz_1_center.squeeze(-1)
+        # xyz_0 = xyz_0 - xyz_0_center.squeeze(-1)
+        # xyz_1 = xyz_1 - xyz_1_center.squeeze(-1)
     
         # # Forward pass through the model
         quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
@@ -997,7 +997,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
         # # Combine pose and correspondence loss
-        loss = rot_loss + point_error  # trans_loss + beta*corr_loss 
+        loss = rot_loss + trans_loss + point_error  #  + beta*corr_loss 
 
         # # Backward pass and optimization step
         loss.backward()
@@ -1111,7 +1111,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # # Combine pose and correspondence loss
-            loss = rot_loss + point_error ########### trans_loss + beta*corr_loss
+            loss = rot_loss + trans_loss + point_error ########### trans_loss + beta*corr_loss
 
             # Accumulate losses
             running_loss += loss.item()
@@ -1246,7 +1246,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Scheduler for decaying the learning rate every 15 epochs
-    scheduler = StepLR(optimizer, step_size=15, gamma=0.1)  # Gamma defines the decay factor
+    scheduler = StepLR(optimizer, step_size=25, gamma=0.1)  # Gamma defines the decay factor
 
     # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
     # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
@@ -1396,7 +1396,7 @@ def get_args():
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=2e-4, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')

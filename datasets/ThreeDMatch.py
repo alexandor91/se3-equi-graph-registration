@@ -179,7 +179,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         self.augment_axis = augment_axis
         self.augment_rotation = augment_rotation
         self.augment_translation = augment_translation
-        self.synthetic_pose_flag = True
+        self.synthetic_pose_flag = False
         self.normalize_use = False
 
         # Load the file list based on the split
@@ -301,6 +301,11 @@ class ThreeDMatchTrainVal(data.Dataset):
         labels = data.get('labels')  # Binary labels (N,)
         gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
 
+        # print("@@@@@@@@@@@@ #### @@@@@@@@@@@")
+        # print(len(corr[:, 0]))
+        # print(len(np.where(labels == 1)[0]))
+        # print(len(np.where(labels == 0)[0]))
+
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
             src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
@@ -327,25 +332,27 @@ class ThreeDMatchTrainVal(data.Dataset):
 
         # Sample fixed number of points
         sample_size = self.num_node
-        if sample_size > N_src or sample_size > N_tgt:
-            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        # if sample_size > N_src or sample_size > N_tgt:
+        #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
 
         # Sample 60% from positive labels and 40% from negative labels
-        num_pos = int(self.num_node * 0.6)
+        num_pos = int(self.num_node * 1.0)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
 
-        if len(pos_indices) < 5:
+        if len(pos_indices) < 35:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
         else:
             pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+            pos_sampled = np.sort(pos_sampled)
             neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+            neg_sampled = np.sort(neg_sampled)
             # Combine positive and negative indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])
         # Sample source points and features
@@ -358,22 +365,31 @@ class ThreeDMatchTrainVal(data.Dataset):
         sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
         sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
 
-        # Create remapping for source indices in the new range
-        remap_src = {old_idx: new_idx for new_idx, old_idx in enumerate(sampled_indices)}
 
-        # Create remapping for target indices based on unique sampled target indices
-        unique_tgt_indices = np.unique(sampled_tgt_indices)
-        remap_tgt = {old_idx: new_idx for new_idx, old_idx in enumerate(unique_tgt_indices)}
+        # Ensure that all values are mapped independently into the range [0, N-1]
+        unique_indices_first = np.unique(sampled_corr[:, 0])  # Unique values in the first column
+        unique_indices_second = np.unique(sampled_corr[:, 1])  # Unique values in the second column
 
-        # Remap corr source indices to be in the range of self.num_node
-        remapped_corr = np.zeros_like(sampled_corr)
-        remapped_corr[:, 0] = [remap_src[src_idx] for src_idx in sampled_corr[:, 0]]  # Remap source
-        remapped_corr[:, 1] = [remap_tgt[tgt_idx] for tgt_idx in sampled_corr[:, 1]]  # Remap target
+        # Create mappings for each column
+        mapping_first = {val: idx for idx, val in enumerate(unique_indices_first)}
+        mapping_second = {val: idx for idx, val in enumerate(unique_indices_second)}
+
+        # Remap both columns
+        remapped_first = np.array([mapping_first[val] for val in sampled_corr[:, 0]])
+        remapped_second = np.array([mapping_second[val] for val in sampled_corr[:, 1]])
+
+        # Combine remapped columns into a new array
+        remapped_corr = np.stack((remapped_first, remapped_second), axis=1)
 
         # print(remapped_corr)
         # Retrieve the labels for the resampled source points
         sampled_labels = labels[sampled_indices]
-
+        # print("@@@@@@@@@@@@   @@@@@@@@@@@")
+        # print(pos_indices)
+        # print(neg_indices)
+        # print(sampled_labels)
+        # print(len(remapped_corr))
+        # print(remapped_corr)
         # # Now remap target indices
         # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
         # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
@@ -484,26 +500,28 @@ class ThreeDMatchTest(data.Dataset):
 
         # Sample fixed number of points
         sample_size = self.num_node
-        if sample_size > N_src or sample_size > N_tgt:
-            print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
+        # if sample_size > N_src or sample_size > N_tgt:
+        #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
 
         # Sample 60% from positive labels and 40% from negative labels
-        num_pos = int(self.num_node * 0.6)
+        num_pos = int(self.num_node * 1.0)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
 
 
-        if len(pos_indices) < 5:
+        if len(pos_indices) < 35:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
         else:
             pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+            pos_sampled = np.sort(pos_sampled)
             neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+            neg_sampled = np.sort(neg_sampled)
             # Combine positive and negative indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])
 

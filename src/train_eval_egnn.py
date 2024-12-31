@@ -590,7 +590,7 @@ class CrossAttentionPoseRegression(nn.Module):
             nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
         )
         self.mlp_pose = nn.Sequential(
-            nn.Linear(128 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
+            nn.Linear(32 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
             nn.ReLU(),
             # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(256, 128),  # Intermediate layer
@@ -675,8 +675,8 @@ class CrossAttentionPoseRegression(nn.Module):
         # h_tgt = torch.cat([h_tgt], dim=-1)  # Shape: [2048, 35]
 
         # # Normalize features for Hadamard product (L2 normalization)
-        # h_src_norm_new = F.normalize(h_src, p=2, dim=-1)
-        # h_tgt_norm_new = F.normalize(h_tgt, p=2, dim=-1)
+        h_src = F.normalize(h_src, p=2, dim=-1)
+        h_tgt = F.normalize(h_tgt, p=2, dim=-1)
 
         large_sim_matrix = torch.mm(h_src_norm, h_tgt_norm.t())  # Shape: [num_nodes, num_nodes]
         # Apply softmax along rows
@@ -695,8 +695,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # Get similarity at correspondence indices
         corr_similarity = torch.zeros_like(large_sim_matrix)  # Shape: [2048, 2048]
-        corr_similarity = large_sim_matrix[corr_idx]  # Get correspondence similarity values
-        tgt_indices = large_sim_matrix.argmax(dim=1)
+        tgt_indices = large_sim_matrix.argmax(dim=-1)
         new_h_tgt = h_tgt[tgt_indices]
         # print(corr_similarity.shape)
 
@@ -710,57 +709,107 @@ class CrossAttentionPoseRegression(nn.Module):
         # corr_similarity[valid_indices[:, 0], valid_indices[:, 1]]= large_sim_matrix[valid_indices[:, 0], valid_indices[:, 1]] 
         # Assign 1 at the corresponding positions in the ground truth matrix
         gt_matrix[valid_indices[:, 0], valid_indices[:, 1]] = 1.0
+        corr_similarity[valid_indices[:, 0], valid_indices[:, 1]] = large_sim_matrix[valid_indices[:, 0], valid_indices[:, 1]]  # Get correspondence similarity values
 
-        # Compute correspondence loss
-        # corr_loss = F.mse_loss(corr_similarity, gt_matrix)  # Correspondence should be close to 1
+        # # Compute correspondence loss
+        # print(corr_similarity.shape)
+        # print(gt_matrix.shape)
+        corr_loss = F.mse_loss(corr_similarity, gt_matrix)  # Correspondence should be close to 1
 
 
-        # Compress features to 128 dimensions
-        compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)
-        compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)
+        # Compress features
+        compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)  # Shape: [N, D']
+        compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)  # Shape: [N, D']
 
         # Normalize compressed features
         compressed_h_src_norm = F.normalize(compressed_h_src, p=2, dim=-1)
         compressed_h_tgt_norm = F.normalize(compressed_h_tgt, p=2, dim=-1)
 
-        # Compute compressed similarity matrix
-        sim_matrix = torch.mm(compressed_h_src_norm, compressed_h_tgt_norm.t())  # Shape: [128, 128]
+        # Compute similarity matrix
+        sim_matrix = torch.mm(compressed_h_src_norm, compressed_h_tgt_norm.t())  # Shape: [N, N]
+
         # Apply softmax along rows
-        # sim_matrix = F.softmax(sim_matrix, dim=-1)
-        # Apply softmax along columns
-        # sim_matrix = F.softmax(sim_matrix, dim=0)
-        # Rank loss on compressed similarity matrix
-        u, s, v = torch.svd(sim_matrix)
+        sim_matrix = F.softmax(sim_matrix, dim=-1)
+
+        # Compute SVD
+        u, s, v = torch.svd(sim_matrix)  # u: [N, N], s: [N], v: [N, N]
+
+        k = 32
+        # # Select top-k singular values and corresponding vectors
+        # top_k_u = u[:, :k]  # Top-k left singular vectors
+        # top_k_v = v[:, :k]  # Top-k right singular vectors
+
+        # # Retrieve indices of top-k singular values
+        # top_k_indices_src = torch.topk(top_k_u.abs().sum(dim=1), k, largest=True).indices  # Source indices
+        # top_k_indices_tgt = torch.topk(top_k_v.abs().sum(dim=1), k, largest=True).indices  # Target indices
+
+        # # Extract top-k compressed features for source and target
+        # top_k_compressed_h_src = compressed_h_src[top_k_indices_src]  # Shape: [k, D']
+        # top_k_compressed_h_tgt = compressed_h_tgt[top_k_indices_tgt]  # Shape: [k, D']
+
         # rank_loss = F.mse_loss(s[:128], torch.ones(128).cuda())  # Target rank is 128
         # Calculate the trace (sum of diagonal elements) of the similarity matrix
-        # Get the top 35 singular values and sum them
-        top_k_sum = s[:35].sum()  # Sum of the top 35 singular values
+        top_k_sum = s[:k].sum()  # Sum of the top 35 singular values
 
         # Rank loss: Compare the sum of top 35 singular values to the target value 35
-        rank_loss = F.mse_loss(top_k_sum, torch.tensor(35.0).cuda())  # Target sum is 35
+        rank_loss = F.mse_loss(top_k_sum, torch.tensor(12.0).cuda())  # Target sum is 35
 
         # print("$$$$$$$")
         # print(s)
         # print(corr_loss)
         # Total correspondence loss
-        # total_corr_loss = 1e-2 * rank_loss       # Weigh the source and target descriptors using the similarity matrix
+        rank_loss = rank_loss + corr_loss      # Weigh the source and target descriptors using the similarity matrix
 
-        # weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
-        # weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
+        weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
+        weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
-        # # Concatenate the source and target weighted features
-        # combined_features = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: [128, 70]
+        # Sort singular values in descending order
+        sorted_indices = torch.argsort(s, descending=True)[:k]  # Indices of top-k singular values
+        
+        # Initialize lists to store indices and contributions
+        # top_contributions = []
+        top_indices_src = []
+        top_indices_tgt = []
+        
+        for idx in sorted_indices:
+            # Singular vectors corresponding to the singular value
+            U = u[:, idx]  # Left singular vector (source)
+            V = v[:, idx]  # Right singular vector (target)
+            
+            # Compute contribution matrix for this singular component
+            contribution = torch.outer(U, V)  # Outer product for this singular vector pair
+            
+            # Find indices of highest contributions in the contribution matrix
+            flat_contrib = contribution.abs().flatten()  # Absolute values for ranking
+            top_flat_indices = torch.argsort(flat_contrib, descending=True)[:1]  # Take top-1 per singular value
+            
+            # Convert flat indices back to 2D (row, column)
+            N = sim_matrix.shape[0]
+            rows = top_flat_indices // N
+            cols = top_flat_indices % N
+            
+            # Collect the indices for the top contributions
+            top_indices_src.extend(rows.tolist())
+            top_indices_tgt.extend(cols.tolist())
+            # top_contributions.append(s[idx].item())  # Append the singular value contribution
 
-        # # Flatten the combined features for pose regression
-        # combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
+        # Retrieve the corresponding features from compressed_h_src and compressed_h_tgt
+        selected_h_src = compressed_h_src_norm[top_indices_src, :]  # Shape: [top_k, D]
+        selected_h_tgt = compressed_h_tgt_norm[top_indices_tgt, :]  # Shape: [top_k, D]
 
-        # # Regress the pose (quaternion + translation)
-        # pose = self.mlp_pose(combined_features_flat)  # Shape: [7]
-        combined_features = torch.cat([h_src, h_tgt], dim=-1)  # Shape: [N, 70]
-        compressed_features = self.shared_mlp_decoder(combined_features)
-        global_features = self.global_pooling(compressed_features.T).T
-        pose = self.shallow_mlp_pose(global_features)
-        pose = pose.squeeze(0)
+        # Concatenate the source and target weighted features
+        combined_features = torch.cat([selected_h_src, selected_h_tgt], dim=-1)  # Shape: [128, 70]
+
+        # Flatten the combined features for pose regression
+        combined_features_flat = combined_features.view(-1)  # Shape: [128 * 70]
+
+        # Regress the pose (quaternion + translation)
+        pose = self.mlp_pose(combined_features_flat)  # Shape: [7]
+        # combined_features = torch.cat([h_src, h_tgt], dim=-1)  # Shape: [N, 70]
+        # compressed_features = self.shared_mlp_decoder(combined_features)
+        # global_features = self.global_pooling(compressed_features.T).T
+        # pose = self.shallow_mlp_pose(global_features)
+        # pose = pose.squeeze(0)
         # The pose consists of a quaternion (4D) and a translation (3D)
         quaternion = pose[:4]  # Shape: [4]
         quaternion = F.normalize(quaternion, p=2, dim=-1) # Normalize the quaternion
@@ -797,13 +846,42 @@ def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt
     translation = translation.to(device)
     rotation_matrix = rotation_matrix.to(device)
 
-    # Ensure x_src is on the same device
+    # Ensure tensors are on the correct device
     x_src = x_src.to(device)
+    x_tgt = x_tgt.to(device)
+    gt_labels = gt_labels.to(device)  # Shape: [N], values 0 or 1
+
     # Transform source points
-    x_src_transformed = torch.matmul(rotation_matrix, x_src.T).T + translation    
-    # x_src_transformed = torch.matmul(x_src, rotation_matrix.T) + translation
-    # Compute the point error (e.g., mean L2 norm)
-    point_error = torch.mean(torch.norm(x_src_transformed - x_tgt.to(device), dim=-1))
+    x_src_transformed = torch.matmul(rotation_matrix, x_src.T).T + translation
+
+    # Compute the L2 norm (Euclidean distance) between transformed source points and target points
+    point_distances = torch.norm(x_src_transformed - x_tgt, dim=-1)  # Shape: [N]
+
+    # Apply the mask to select valid correspondences
+    valid_distances = point_distances[gt_labels == 1]  # Select distances where gt_labels == 1
+
+    # Compute the mean error over valid correspondences
+    if valid_distances.numel() > 0:  # Avoid division by zero
+        point_error = torch.mean(valid_distances)  # Mean L2 norm error for valid pairs
+    else:
+        point_error = torch.tensor(0.0, device=device)  # Default to 0 if no valid pairs
+
+    # Compute the centroids (mean) for source and target points
+    centroid_src = torch.mean(x_src, dim=0, keepdim=True)  # Shape: [1, 3]
+    centroid_tgt = torch.mean(x_tgt, dim=0, keepdim=True)  # Shape: [1, 3]
+
+    # # Center the source and target points
+    # x_src_centered = x_src - centroid_src  # Shape: [N, 3]
+    # x_tgt_centered = x_tgt - centroid_tgt  # Shape: [N, 3]
+
+    # # Transform the centered source points
+    # x_src_transformed = torch.matmul(rotation_matrix, x_src_centered.T).T + translation
+    # # Compute the mean L2 norm translation error
+    # point_error = torch.mean(
+    #     torch.norm(
+    #         x_src_transformed - x_tgt_centered, dim=-1
+    #     )
+    # )
 
     # Compute the feature loss (e.g., using gt_labels as mask)
     feature_loss = torch.mean(
@@ -834,9 +912,6 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
 
     # quaternion_loss = huber_loss(pred_quaternion, gt_quaternion)
     # translation_loss = huber_loss(pred_translation, gt_translation)
-
-    # # Return the combined loss
-    # return quaternion_loss + translation_loss
 
     # Extract ground truth translation and rotation
     gt_translation = gt_pose[:3, 3]
@@ -938,11 +1013,12 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # xyz_homo = torch.cat([xyz_0, ones], dim=-1)  # Shape: 1 x N x 4
 
         # # Step 2: Apply the extrinsic transformation
-        # xyz_transformed_homo = torch.matmul(xyz_homo, gt_pose)  # Shape: 1 x N x 4
+        # xyz_transformed_homo = torch.matmul(xyz_homo, gt_pose.T)  # Shape: 1 x N x 4
 
         # # Step 3: Convert back to 3D by dropping the homogeneous coordinate
         # xyz_transformed = xyz_transformed_homo[..., :3]  # Shape: 1 x N x 3
         # xyz_diff = xyz_transformed - xyz_1
+        # print("$$$ transformed gt errors $$$$")
         # print(xyz_diff)
         # Initialize KNN graphs for source and target point clouds
         k = 16
@@ -997,7 +1073,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
         # # Combine pose and correspondence loss
-        loss = rot_loss + trans_loss + point_error  #  + beta*corr_loss 
+        loss = rot_loss + trans_loss + beta*corr_loss 
 
         # # Backward pass and optimization step
         loss.backward()
@@ -1028,7 +1104,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
     avg_point_error = running_point_error / len(dataloader)
     avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
 
-    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f}, Feature error:  {avg_feature_consensus_error:.6f}')
+    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f} | Corr loss: {corr_loss} | Feature error:  {avg_feature_consensus_error:.6f}')
 
     return avg_loss
 
@@ -1111,7 +1187,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # # Combine pose and correspondence loss
-            loss = rot_loss + trans_loss + point_error ########### trans_loss + beta*corr_loss
+            loss = rot_loss + trans_loss + beta*corr_loss ########### trans_loss + beta*corr_loss
 
             # Accumulate losses
             running_loss += loss.item()
@@ -1120,6 +1196,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             running_corr_loss += corr_loss.item()
             running_point_error += point_error.item()
             running_feature_consensus_error += feature_loss.item()
+
         # Return the average losses over the entire train dataset
         avg_loss = running_loss / len(dataloader)
         avg_rot_loss = running_rot_loss / len(dataloader)
@@ -1251,7 +1328,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
     # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
     # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     best_val_loss = float('inf')  # Track the best validation loss
-
+    val_loss = float('inf')
     # If using PointNet encoder, initialize it separately
     if use_pointnet:
         pointnet = PointNet().to(device)
@@ -1278,9 +1355,9 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         if (epoch + 1) % 1 == 0:
             val_loss, val_pose_loss, val_corr_loss, avg_point_error, avg_feature_consensus_error = validate(model, val_loader, device, epoch, writer, use_pointnet)
             print(val_loss)
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}, Validation Avg Loss: {val_loss:.6f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Eva Avg Loss: {val_loss:.6f}, Validation Avg Loss: {val_pose_loss:.6f}, Val corr loss: {val_corr_loss: 6f}')
         else:
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}')
+            print(f'Epoch {epoch + 1}/{num_epochs} - Eva Avg Loss: {val_loss:.6f}')
 
         # Save the checkpoint if the validation loss is the best so far
         if val_loss < best_val_loss:

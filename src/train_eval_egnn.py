@@ -590,7 +590,7 @@ class CrossAttentionPoseRegression(nn.Module):
             nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
         )
         self.mlp_pose = nn.Sequential(
-            nn.Linear(32 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
+            nn.Linear(16 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
             nn.ReLU(),
             # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(256, 128),  # Intermediate layer
@@ -734,7 +734,7 @@ class CrossAttentionPoseRegression(nn.Module):
         # Compute SVD
         u, s, v = torch.svd(sim_matrix)  # u: [N, N], s: [N], v: [N, N]
 
-        k = 32
+        k = 16
         # # Select top-k singular values and corresponding vectors
         # top_k_u = u[:, :k]  # Top-k left singular vectors
         # top_k_v = v[:, :k]  # Top-k right singular vectors
@@ -758,7 +758,7 @@ class CrossAttentionPoseRegression(nn.Module):
         # print(s)
         # print(corr_loss)
         # Total correspondence loss
-        rank_loss = rank_loss + corr_loss      # Weigh the source and target descriptors using the similarity matrix
+        rank_loss = rank_loss  + corr_loss  # Weigh the source and target descriptors using the similarity matrix
 
         weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
         weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
@@ -1424,6 +1424,18 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
             graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
             graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
 
+            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
+            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
+                xyz_0 = xyz_0.squeeze(0)
+            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
+                xyz_1 = xyz_1.squeeze(0)
+            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
+                gt_pose = gt_pose.squeeze(0)
+            if corr.dim() == 3 and corr.size(0) == 1:
+                corr = corr.squeeze(0)
+            if labels.dim() == 3 and labels.size(0) == 1:
+                labels = labels.squeeze(0)
+                
             # Descriptor generation using PointNet or pre-computed features
             if use_pointnet:
                 feat_0 = pointnet(xyz_0, graph_idx_0, None)

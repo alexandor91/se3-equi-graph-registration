@@ -244,14 +244,17 @@ class KITTItrainVal(data.Dataset):
         num_pos = int(self.num_node * 0.6)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samples will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samples will be used!")
 
-        if len(pos_indices) < 5:
+
+        if len(pos_indices) < 35:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
         else:
             pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+            pos_sampled = np.sort(pos_sampled)
             neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+            neg_sampled = np.sort(neg_sampled)
             # Combine positive and negative indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])
 
@@ -288,12 +291,14 @@ class KITTItrainVal(data.Dataset):
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
-            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            # sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
             aug_T = translation_matrix(self.augment_translation)
             aug_trans = integrate_trans(aug_R, aug_T)
-            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+            sampled_tgt_features = sampled_src_features
 
         # Optional normalization
         if self.normalize_use:
@@ -403,14 +408,16 @@ class KITTItest(data.Dataset):
         num_pos = int(self.num_node * 0.6)
         num_neg = self.num_node - num_pos
 
-        if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-            print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samples will be used!")
+        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
+        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samples will be used!")
 
-        if len(pos_indices) < 5:
+        if len(pos_indices) < 35:
             sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
         else:
             pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+            pos_sampled = np.sort(pos_sampled)
             neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+            neg_sampled = np.sort(neg_sampled)
             # Combine positive and negative indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])
 
@@ -447,12 +454,14 @@ class KITTItest(data.Dataset):
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
-            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            # sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
             aug_T = translation_matrix(self.augment_translation)
             aug_trans = integrate_trans(aug_R, aug_T)
-            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+            sampled_tgt_features = sampled_src_features
 
         # Optional normalization
         if self.normalize_use:

@@ -165,8 +165,8 @@ class ThreeDMatchTrainVal(data.Dataset):
                  use_mutual=True,
                  downsample=0.03, 
                  augment_axis=1, 
-                 augment_rotation=1.0,
-                 augment_translation=0.01):
+                 augment_rotation=1.4,
+                 augment_translation=0.1):
         self.root = root
         self.split = split
         self.descriptor = descriptor
@@ -179,7 +179,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         self.augment_axis = augment_axis
         self.augment_rotation = augment_rotation
         self.augment_translation = augment_translation
-        self.synthetic_pose_flag = False
+        self.synthetic_pose_flag = True
         self.normalize_use = False
 
         # Load the file list based on the split
@@ -397,12 +397,21 @@ class ThreeDMatchTrainVal(data.Dataset):
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
-            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            # sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
             aug_T = translation_matrix(self.augment_translation)
             aug_trans = integrate_trans(aug_R, aug_T)
-            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+            sampled_tgt_features = sampled_src_features
+            # Create sampled_labels as an array of ones with shape (self.num_node,)
+            sampled_labels = np.ones(self.num_node, dtype=np.float32)
+
+            # Create remapped_corr as a (self.num_node, 2) array
+            remapped_corr = np.arange(self.num_node, dtype=np.float32).reshape(-1, 1)
+            remapped_corr = np.hstack((remapped_corr, remapped_corr))
+           
 
         # Optional normalization
         if self.normalize_use:
@@ -525,6 +534,7 @@ class ThreeDMatchTest(data.Dataset):
             # Combine positive and negative indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])
 
+
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
         sampled_src_features = src_features[sampled_indices]
@@ -558,12 +568,23 @@ class ThreeDMatchTest(data.Dataset):
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
-            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
+            # sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
             aug_T = translation_matrix(self.augment_translation)
             aug_trans = integrate_trans(aug_R, aug_T)
-            sampled_src_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts = transform(sampled_src_pts, aug_trans)
+            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
+            sampled_tgt_features = sampled_src_features
+            # Create sampled_labels as an array of ones with shape (self.num_node,)
+            sampled_labels = np.ones(self.num_node, dtype=np.float32)
+
+            # Create remapped_corr as a (self.num_node, 2) array
+            remapped_corr = np.arange(self.num_node, dtype=np.float32).reshape(-1, 1)
+            remapped_corr = np.hstack((remapped_corr, remapped_corr))
+
+            
+
 
         # Optional normalization
         if self.normalize_use:

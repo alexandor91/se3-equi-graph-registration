@@ -299,6 +299,12 @@ class KITTItrainVal(data.Dataset):
             sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
             sampled_tgt_features = sampled_src_features
+            # Create sampled_labels as an array of ones with shape (self.num_node,)
+            sampled_labels = np.ones(self.num_node, dtype=np.float32)
+            # Create remapped_corr as a (self.num_node, 2) array
+            remapped_corr = np.arange(self.num_node, dtype=np.float32).reshape(-1, 1)
+            remapped_corr = np.hstack((remapped_corr, remapped_corr))
+           
 
         # Optional normalization
         if self.normalize_use:
@@ -462,6 +468,13 @@ class KITTItest(data.Dataset):
             sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
             gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
             sampled_tgt_features = sampled_src_features
+            # Create sampled_labels as an array of ones with shape (self.num_node,)
+            sampled_labels = np.ones(self.num_node, dtype=np.float32)
+
+            # Create remapped_corr as a (self.num_node, 2) array
+            remapped_corr = np.arange(self.num_node, dtype=np.float32).reshape(-1, 1)
+            remapped_corr = np.hstack((remapped_corr, remapped_corr))
+           
 
         # Optional normalization
         if self.normalize_use:

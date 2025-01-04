@@ -590,7 +590,7 @@ class CrossAttentionPoseRegression(nn.Module):
             nn.Linear(num_nodes//4, 128)  # Keep 128 points compressed
         )
         self.mlp_pose = nn.Sequential(
-            nn.Linear(16 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
+            nn.Linear(35 * 2 * self.hidden_nf, 256),  # Concatenate source & target and compress
             nn.ReLU(),
             # nn.Dropout(p=0.1),  # Add dropout after activation
             nn.Linear(256, 128),  # Intermediate layer
@@ -716,10 +716,18 @@ class CrossAttentionPoseRegression(nn.Module):
         # print(gt_matrix.shape)
         corr_loss = F.mse_loss(corr_similarity, gt_matrix)  # Correspondence should be close to 1
 
+        combined_features_pairs = torch.cat([h_src, h_tgt], dim=-1)  # Shape: [N, 70]
+        # print("$$$$$$$$$$$$$$")
+        # print(combined_features_pairs.shape)
 
-        # Compress features
-        compressed_h_src = self.mlp_compress(h_src.transpose(0, 1)).transpose(0, 1)  # Shape: [N, D']
-        compressed_h_tgt = self.mlp_compress(h_tgt.transpose(0, 1)).transpose(0, 1)  # Shape: [N, D']
+        # Transpose the input to shape [70, num_nodes] for compression along num_nodes
+        combined_features_pairs = combined_features_pairs.T  # Shape: [70, num_nodes]
+        # Apply compression MLP
+        compressed_features = self.mlp_compress(combined_features_pairs)  # Shape: [70, 128]
+        # Transpose back to [128, 70]
+        compressed_features = compressed_features.T  # Shape: [128, 70]
+        # Split along the feature dimension into two parts
+        compressed_h_src, compressed_h_tgt = torch.split(compressed_features, 35, dim=1)  # Shape: [128, 35] each
 
         # Normalize compressed features
         compressed_h_src_norm = F.normalize(compressed_h_src, p=2, dim=-1)
@@ -734,7 +742,7 @@ class CrossAttentionPoseRegression(nn.Module):
         # Compute SVD
         u, s, v = torch.svd(sim_matrix)  # u: [N, N], s: [N], v: [N, N]
 
-        k = 16
+        k = 35
         # # Select top-k singular values and corresponding vectors
         # top_k_u = u[:, :k]  # Top-k left singular vectors
         # top_k_v = v[:, :k]  # Top-k right singular vectors
@@ -752,50 +760,50 @@ class CrossAttentionPoseRegression(nn.Module):
         top_k_sum = s[:k].sum()  # Sum of the top 35 singular values
 
         # Rank loss: Compare the sum of top 35 singular values to the target value 35
-        rank_loss = F.mse_loss(top_k_sum, torch.tensor(12.0).cuda())  # Target sum is 35
+        rank_loss = F.mse_loss(top_k_sum, torch.tensor(35.0).cuda())  # Target sum is 35
 
         # print("$$$$$$$")
         # print(s)
         # print(corr_loss)
         # Total correspondence loss
-        rank_loss = rank_loss  + corr_loss  # Weigh the source and target descriptors using the similarity matrix
+        # rank_loss = rank_loss  + corr_loss # Weigh the source and target descriptors using the similarity matrix
 
         weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
         weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
-        # Sort singular values in descending order
-        sorted_indices = torch.argsort(s, descending=True)[:k]  # Indices of top-k singular values
-        
-        # Initialize lists to store indices and contributions
-        # top_contributions = []
+        # Get top k singular values and their indices
+        sorted_indices = torch.argsort(s, descending=True)[:k]
+
         top_indices_src = []
         top_indices_tgt = []
-        
-        for idx in sorted_indices:
-            # Singular vectors corresponding to the singular value
-            U = u[:, idx]  # Left singular vector (source)
-            V = v[:, idx]  # Right singular vector (target)
-            
-            # Compute contribution matrix for this singular component
-            contribution = torch.outer(U, V)  # Outer product for this singular vector pair
-            
-            # Find indices of highest contributions in the contribution matrix
-            flat_contrib = contribution.abs().flatten()  # Absolute values for ranking
-            top_flat_indices = torch.argsort(flat_contrib, descending=True)[:1]  # Take top-1 per singular value
-            
-            # Convert flat indices back to 2D (row, column)
-            N = sim_matrix.shape[0]
-            rows = top_flat_indices // N
-            cols = top_flat_indices % N
-            
-            # Collect the indices for the top contributions
-            top_indices_src.extend(rows.tolist())
-            top_indices_tgt.extend(cols.tolist())
-            # top_contributions.append(s[idx].item())  # Append the singular value contribution
+        N = sim_matrix.shape[0]
 
-        # Retrieve the corresponding features from compressed_h_src and compressed_h_tgt
-        selected_h_src = compressed_h_src_norm[top_indices_src, :]  # Shape: [top_k, D]
-        selected_h_tgt = compressed_h_tgt_norm[top_indices_tgt, :]  # Shape: [top_k, D]
+        # For each of the top k singular values
+        for i in range(k):
+            # Get the corresponding left and right singular vectors
+            u_k = u[:, sorted_indices[i:i+1]]  # Shape: [N, 1]
+            v_k = v[:, sorted_indices[i:i+1]]  # Shape: [N, 1]
+            
+            # Reconstruct partial similarity matrix for this component
+            sim_k = torch.mm(u_k * s[sorted_indices[i]], v_k.t())  # Shape: [N, N]
+            
+            # Find the maximum value indices in this component
+            max_val, max_idx = torch.max(sim_k.abs().flatten(), dim=0)
+            
+            # Convert flat index to 2D indices
+            src_idx = max_idx // N
+            tgt_idx = max_idx % N
+            
+            top_indices_src.append(src_idx.item())
+            top_indices_tgt.append(tgt_idx.item())
+
+        # Convert to tensors for indexing
+        top_indices_src = torch.tensor(top_indices_src, device=sim_matrix.device)
+        top_indices_tgt = torch.tensor(top_indices_tgt, device=sim_matrix.device)
+
+        # Get corresponding features 
+        selected_h_src = compressed_h_src_norm[top_indices_src]  # Shape: [k, D]
+        selected_h_tgt = compressed_h_tgt_norm[top_indices_tgt]  # Shape: [k, D]
 
         # Concatenate the source and target weighted features
         combined_features = torch.cat([selected_h_src, selected_h_tgt], dim=-1)  # Shape: [128, 70]

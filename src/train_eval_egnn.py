@@ -771,39 +771,39 @@ class CrossAttentionPoseRegression(nn.Module):
         weighted_h_src = torch.mm(sim_matrix.transpose(0, 1), compressed_h_src)  # Shape: [128, 35]
         weighted_h_tgt = torch.mm(sim_matrix, compressed_h_tgt)  # Shape: [128, 35]
 
-        # Get top k singular values and their indices
-        sorted_indices = torch.argsort(s, descending=True)[:k]
-
+        # Sort singular values in descending order
+        sorted_indices = torch.argsort(s, descending=True)[:k]  # Indices of top-k singular values
+        
+        # Initialize lists to store indices and contributions
+        # top_contributions = []
         top_indices_src = []
         top_indices_tgt = []
-        N = sim_matrix.shape[0]
+        
+        for idx in sorted_indices:
+            # Singular vectors corresponding to the singular value
+            U = u[:, idx]  # Left singular vector (source)
+            V = v[:, idx]  # Right singular vector (target)
+            
+            # Compute contribution matrix for this singular component
+            contribution = torch.outer(U, V)  # Outer product for this singular vector pair
+            
+            # Find indices of highest contributions in the contribution matrix
+            flat_contrib = contribution.abs().flatten()  # Absolute values for ranking
+            top_flat_indices = torch.argsort(flat_contrib, descending=True)[:1]  # Take top-1 per singular value
+            
+            # Convert flat indices back to 2D (row, column)
+            N = sim_matrix.shape[0]
+            rows = top_flat_indices // N
+            cols = top_flat_indices % N
+            
+            # Collect the indices for the top contributions
+            top_indices_src.extend(rows.tolist())
+            top_indices_tgt.extend(cols.tolist())
+            # top_contributions.append(s[idx].item())  # Append the singular value contribution
 
-        # For each of the top k singular values
-        for i in range(k):
-            # Get the corresponding left and right singular vectors
-            u_k = u[:, sorted_indices[i:i+1]]  # Shape: [N, 1]
-            v_k = v[:, sorted_indices[i:i+1]]  # Shape: [N, 1]
-            
-            # Reconstruct partial similarity matrix for this component
-            sim_k = torch.mm(u_k * s[sorted_indices[i]], v_k.t())  # Shape: [N, N]
-            
-            # Find the maximum value indices in this component
-            max_val, max_idx = torch.max(sim_k.abs().flatten(), dim=0)
-            
-            # Convert flat index to 2D indices
-            src_idx = max_idx // N
-            tgt_idx = max_idx % N
-            
-            top_indices_src.append(src_idx.item())
-            top_indices_tgt.append(tgt_idx.item())
-
-        # Convert to tensors for indexing
-        top_indices_src = torch.tensor(top_indices_src, device=sim_matrix.device)
-        top_indices_tgt = torch.tensor(top_indices_tgt, device=sim_matrix.device)
-
-        # Get corresponding features 
-        selected_h_src = compressed_h_src_norm[top_indices_src]  # Shape: [k, D]
-        selected_h_tgt = compressed_h_tgt_norm[top_indices_tgt]  # Shape: [k, D]
+        # Retrieve the corresponding features from compressed_h_src and compressed_h_tgt
+        selected_h_src = compressed_h_src_norm[top_indices_src, :]  # Shape: [top_k, D]
+        selected_h_tgt = compressed_h_tgt_norm[top_indices_tgt, :]  # Shape: [top_k, D]
 
         # Concatenate the source and target weighted features
         combined_features = torch.cat([selected_h_src, selected_h_tgt], dim=-1)  # Shape: [128, 70]

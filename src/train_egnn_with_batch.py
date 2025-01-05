@@ -456,38 +456,15 @@ def rotation_matrix_to_quaternion(rotation_matrix):
 
 def quaternion_to_matrix(quaternion):
     """
-    Converts a batched quaternion into 3x3 rotation matrices.
-    Args:
-        quaternion (torch.Tensor): A tensor of shape [B, 4] representing (w, x, y, z).
-    Returns:
-        torch.Tensor: A tensor of shape [B, 3, 3] representing rotation matrices.
-    """
-    w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
-    ww, xx, yy, zz = w * w, x * x, y * y, z * z
-    wx, wy, wz = w * x, w * y, w * z
-    xy, xz, yz = x * y, x * z, y * z
-    
-    rot_matrix = torch.stack([
-        [ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)],
-        [2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)],
-        [2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz]
-    ], dim=-1).reshape(-1, 3, 3).to(quaternion.device)
-    
-    return rot_matrix
-
-
-def quaternion_to_matrix(quaternion):
-    """
-    Converts a quaternion into a 3x3 rotation matrix.
+    Converts a batch of quaternions into 3x3 rotation matrices.
     
     Args:
-        quaternion (torch.Tensor): A tensor of shape (4,) representing (w, x, y, z).
+        quaternion (torch.Tensor): A tensor of shape (B, 4) representing (w, x, y, z) for a batch of size B.
         
     Returns:
-        torch.Tensor: A 3x3 rotation matrix.
+        torch.Tensor: A tensor of shape (B, 3, 3) containing the rotation matrices.
     """
-    # print("$$$$$$$$$$$$")
-    # print(quaternion.shape)
+    # Split the quaternion components
     w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
     
     # Compute the individual terms for the rotation matrix
@@ -495,14 +472,15 @@ def quaternion_to_matrix(quaternion):
     wx, wy, wz = w * x, w * y, w * z
     xy, xz, yz = x * y, x * z, y * z
     
-    # Build the rotation matrix
-    rot_matrix = torch.tensor([
-        [ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)],
-        [2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)],
-        [2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz]
-    ]).to(quaternion.device)
+    # Build the rotation matrices for each batch
+    rot_matrix = torch.stack([
+        torch.stack([ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)], dim=-1),
+        torch.stack([2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)], dim=-1),
+        torch.stack([2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz], dim=-1)
+    ], dim=-2)  # Shape: (B, 3, 3)
     
-    return rot_matrix
+    return rot_matrix.to(quaternion.device)
+
 
 def matrix_log(R):
     """
@@ -566,7 +544,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # MLP layers for pose regression
         self.mlp_pose = nn.Sequential(
-            nn.Linear(16 * 2 * self.hidden_nf, 256),
+            nn.Linear(128 * 2 * self.hidden_nf, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -590,7 +568,9 @@ class CrossAttentionPoseRegression(nn.Module):
 
         self.global_pooling = nn.AdaptiveMaxPool1d(1)
         self.mean_pooling = nn.AdaptiveAvgPool1d(1)
-
+        self.bn1 = nn.BatchNorm1d(self.hidden_nf)  # Normalize feature dimension
+        self.bn2 = nn.BatchNorm1d((self.hidden_nf+3))  # Normalize feature dimension
+        self.bn3 = nn.BatchNorm1d((self.hidden_nf+3)*2)  # Normalize feature dimension
         # Weight initialization
         self.initialize_weights()
 
@@ -617,6 +597,9 @@ class CrossAttentionPoseRegression(nn.Module):
         h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
         h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
 
+        # # Normalize features for Hadamard product (L2 normalization)
+        h_src = F.normalize(h_src, p=2, dim=-1)
+        h_tgt = F.normalize(h_tgt, p=2, dim=-1)
         # Compute similarity matrix
         large_sim_matrix = torch.matmul(h_src_norm, h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         large_sim_matrix = F.softmax(large_sim_matrix, dim=-1)
@@ -650,11 +633,14 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # Singular Value Decomposition (SVD)
         u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
-        top_k_sum = s[:, :16].sum(dim=-1)  # Sum of top-k singular values
-        rank_loss = F.mse_loss(top_k_sum, torch.tensor(12.0).to(self.device))
+        top_k_sum = s[:, :35].sum(dim=-1)  # Sum of top-k singular values# Target tensor with the same shape, each value is 12.0
+        target = torch.full_like(top_k_sum, 35.0).to(self.device) # Shape [4], all elements are 35.0
+
+        # Compute the batch loss
+        batch_loss = F.mse_loss(top_k_sum, target)
 
         # Total loss
-        total_loss = rank_loss + corr_loss
+        total_corr_loss = batch_loss    # + corr_loss
 
         # Weighted features
         weighted_h_src = torch.matmul(sim_matrix.transpose(-1, -2), compressed_h_src)  # Shape: [B, N, D]
@@ -665,11 +651,15 @@ class CrossAttentionPoseRegression(nn.Module):
         combined_features_flat = combined_features.view(batch_size, -1)
 
         # Regress pose (quaternion + translation)
+        print("!!!!!!!!!!!!!!!")
+        print(combined_features.shape)
+        print(top_k_sum.shape)
+        print(combined_features_flat.shape)
         pose = self.mlp_pose(combined_features_flat)  # Shape: [B, 7]
         quaternion = F.normalize(pose[:, :4], p=2, dim=-1)  # Normalize quaternion
         translation = pose[:, 4:]
 
-        return quaternion, translation, total_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, labels
+        return quaternion, translation, total_corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, labels
 
     
 def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels):
@@ -728,288 +718,174 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     Compute the loss between the predicted pose (quaternion + translation) and the ground truth pose matrix.
     
     Arguments:
-        pred_quaternion: Tensor of shape [batch_size, 4] (predicted quaternion).
-        pred_translation: Tensor of shape [batch_size, 3] (predicted translation).
-        gt_pose: Tensor of shape [batch_size, 4, 4] (ground truth poses).
-
+    - pred_quaternion: Predicted quaternion of shape [B, 4]
+    - pred_translation: Predicted translation of shape [B, 3]
+    - gt_pose: Ground truth pose as a batch of 4x4 matrices, shape [B, 4, 4]
+    - delta: Huber loss delta parameter
+    
     Returns:
-        rotation_loss: SO(3) geodesic rotation loss.
-        translation_loss: Huber loss for translation.
+    - Rotation loss: Tensor of shape [B]
+    - Translation loss: Tensor of shape [B]
     """
-    batch_size = pred_quaternion.shape[0]
+    batch_size = pred_quaternion.size(0)
+    
+    # Extract ground truth translation and rotation
+    gt_translation = gt_pose[:, :3, 3]  # Shape: [B, 3]
+    gt_rotation = gt_pose[:, :3, :3]    # Shape: [B, 3, 3]
+    gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [B, 3, 3] to [B, 4]
 
-    # Extract ground truth rotation and translation
-    gt_translation = gt_pose[:, :3, 3]
-    gt_rotation = gt_pose[:, :3, :3]
+    # Normalize ground truth and predicted quaternions
+    gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)      # Shape: [B, 4]
+    pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)  # Shape: [B, 4]
 
-    # Convert ground truth rotation matrices to quaternions
-    gt_quaternions = torch.stack([
-        rotation_matrix_to_quaternion(gt_rotation[b])
-        for b in range(batch_size)
-    ], dim=0)
+    # Convert predicted quaternion to rotation matrix
+    pred_rotation = quaternion_to_matrix(pred_quaternion)  # Shape: [B, 3, 3]
 
-    # Normalize quaternions
-    pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)
-    gt_quaternions = F.normalize(gt_quaternions, p=2, dim=-1)
-
-    # Convert predicted quaternion to rotation matrices
-    pred_rotation_matrices = torch.stack([
-        quaternion_to_matrix(pred_quaternion[b])
-        for b in range(batch_size)
-    ], dim=0)
-
+    print("@@@@@@@@@@@@@@")
+    print(pred_rotation.shape)
+    print(gt_rotation.shape)
     # Compute geodesic rotation loss
-    rotation_loss = torch.mean(
-        torch.acos(
-            torch.clamp(
-                (torch.trace(torch.matmul(pred_rotation_matrices, gt_rotation.transpose(1, 2))) - 1) / 2,
-                min=-1,
-                max=1
-            )
-        )
-    )
+    # Compute the batched rotation loss
+    # Compute rotation loss
+    pred_rotation_3x3 = pred_rotation[:, :3, :3]
+    gt_rotation_3x3 = gt_rotation[:, :3, :3]
 
-    # Compute translation loss using Huber loss
-    huber_loss = nn.HuberLoss(delta=delta)
-    translation_loss = huber_loss(pred_translation, gt_translation)
+    pred_rotation_T = pred_rotation_3x3.transpose(-1, -2)
+    R = torch.matmul(pred_rotation_T, gt_rotation_3x3)
+    trace_R = R.diagonal(dim1=-2, dim2=-1).sum(-1)
+
+    rotation_loss = torch.arccos(torch.clamp((trace_R - 1) / 2, min=-1, max=1))
+
+    # Translation loss (Cosine similarity-based)
+    dot_product = torch.sum(pred_translation * gt_translation, dim=-1)  # Shape: [B]
+    norm_pred = torch.norm(pred_translation, dim=-1)                    # Shape: [B]
+    norm_gt = torch.norm(gt_translation, dim=-1)                        # Shape: [B]
+    cosine_similarity = dot_product / (norm_pred * norm_gt)             # Shape: [B]
+
+    translation_loss = torch.arccos(torch.clamp(cosine_similarity, min=-1, max=1))  # Shape: [B]
 
     return rotation_loss, translation_loss
 
-# Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=1, beta=1):
+def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta):
     model.train()
-    running_loss = 0.0
-    running_corr_loss = 0.0  # Track correspondence rank loss
-    running_rot_loss = 0.0  # Track pose rot loss
-    running_trans_loss = 0.0  # Track pose trans loss
-    running_point_error = 0.0
-    running_feature_consensus_error = 0.0
+    total_loss = 0.0
 
     for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-        # Check if any returned data is None, and skip if so
         if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-            print(f"Skipping batch {batch_idx} due to missing data.")
-            continue  # Skip this batch
+            continue
 
-        # Move the data to the specified device (GPU/CPU)
+        optimizer.zero_grad()
+
+        # Move data to the device
         corr = corr.to(device)
         labels = labels.to(device)
         xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-        xyz_0_center = src_pts.mean(dim=1, keepdim=True).to(device)
-        xyz_1_center = tar_pts.mean(dim=1, keepdim=True).to(device)
-        xyz_0 = xyz_0 #- xyz_0_center
-        xyz_1 = xyz_1 #- xyz_1_center
-        scale1 = xyz_0.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
-        scale2 = xyz_1.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
-        # xyz_0 = xyz_0 / scale1
-        # xyz_1 = xyz_1/ scale2
         feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
         gt_pose = gt_pose.to(device)
-        R = gt_pose[:, :3, :3].to(device)
-        T = gt_pose[:, :3, 3].to(device)
-        # Adjust xyz_0_center to match R's expected shape
-        ########### input points shift center #################
-        xyz_0_center = xyz_0_center.squeeze(1).unsqueeze(-1)  # From [1, 1, 3] -> [1, 3] -> [1, 3, 1]
 
-        # Ensure xyz_1_center is of shape [1, 3, 1]
-        xyz_1_center = xyz_1_center.squeeze(1).unsqueeze(-1)  # From [1, 1, 3] -> [1, 3] -> [1, 3, 1]
+        batch_size, num_points, _ = xyz_0.size()
 
-        # Ensure T is of shape [1, 3, 1]
-        T = T.unsqueeze(-1)  # From [1, 3] -> [1, 3, 1]
+        # Flatten the input points for KNN computation
+        # xyz_0_flat = xyz_0.view(-1, xyz_0.size(-1))  # Shape: [batch_size * num_points, 3]
+        # xyz_1_flat = xyz_1.view(-1, xyz_1.size(-1))
 
-        # # Perform the pose norm computation
-        # T_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center)).to(device)  # Result shape: [1, 3, 1]
-        # gt_pose[:, :3, :3] = R
-        # gt_pose[:, :3, 3] = T_norm.transpose(1, 2)
+        # # Create the batch tensor for KNN graph
+        # batch_tensor = torch.arange(batch_size, device=device).repeat_interleave(num_points)
 
-        # T = T.squeeze(-1)  # Shape: [B, 3] -> T is already [B, 3, 1], no need for transpose.
-        # T = T.transpose(1, 2) 
-        # print(xyz_0_center.shape)
-        # print(gt_pose.shape)
-        # # gt_pose_norm = (gt_pose - xyz_1_center + R @ xyz_0_center.T) /scale2
-        # gt_pose_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center.T)).to(device)
-        # gt_pose = gt_pose_norm
+        # # Compute KNN graphs
+        # k = 12
+        # graph_idx_0 = knn_graph(xyz_0_flat, k=k, loop=False, batch=batch_tensor)  # Batch-aware KNN
+        # graph_idx_1 = knn_graph(xyz_1_flat, k=k, loop=False, batch=batch_tensor)
 
-        # # Step 1: Append a homogeneous coordinate (1) to xyz_0
-        # ones = torch.ones(1, xyz_0.size(1), 1, device=xyz_0.device)  # Shape: 1 x N x 1
-        # xyz_homo = torch.cat([xyz_0, ones], dim=-1)  # Shape: 1 x N x 4
+        # # If using PointNet, encode the features
+        # if use_pointnet:
+        #     feature_encoder = PointNet().to(device)
+        #     feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
+        #     feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
 
-        # # Step 2: Apply the extrinsic transformation
-        # xyz_transformed_homo = torch.matmul(xyz_homo, gt_pose.T)  # Shape: 1 x N x 4
+        # # Generate edges and edge attributes
+        # edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0_flat.size(0), 1)
+        # edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1_flat.size(0), 1)
+        edges_0 = None
+        edge_attr_0 = None
+        edges_1 = None
+        edge_attr_1 = None
 
-        # # Step 3: Convert back to 3D by dropping the homogeneous coordinate
-        # xyz_transformed = xyz_transformed_homo[..., :3]  # Shape: 1 x N x 3
-        # xyz_diff = xyz_transformed - xyz_1
-        # print("$$$ transformed gt errors $$$$")
-        # print(xyz_diff)
-        # Initialize KNN graphs for source and target point clouds
-        k = 16
-        ####### remove the batch size when it is one ##############
-        # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-        if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-            xyz_0 = xyz_0.squeeze(0)
-        if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-            xyz_1 = xyz_1.squeeze(0)
-        if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-            gt_pose = gt_pose.squeeze(0)
-        if corr.dim() == 3 and corr.size(0) == 1:
-            corr = corr.squeeze(0)
-        if labels.dim() == 3 and labels.size(0) == 1:
-            labels = labels.squeeze(0)
-
-        graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-        graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
-
-        # Descriptor generation using PointNet or directly using feat_0/feat_1
-        if use_pointnet:
-            feature_encoder = PointNet().to(device)
-            feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        # else:
-        #     feat_0 = feat_0  # Use pre-computed features directly
-        #     feat_1 = feat_1  # Use pre-computed features directly
-
-        if feat_0.dim() == 3 and feat_0.size(0) == 1:
-            feat_0 = feat_0.squeeze(0)
-        if feat_1.dim() == 3 and feat_1.size(0) == 1:
-            feat_1 = feat_1.squeeze(0)
-
-        # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-        # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        # Initialize edges and edge attributes for source and target
-        edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-        edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
-
-        # Zero the gradients
-        optimizer.zero_grad()
-
-        # xyz_0 = xyz_0 - xyz_0_center.squeeze(-1)
-        # xyz_1 = xyz_1 - xyz_1_center.squeeze(-1)
-    
-        # # Forward pass through the model
+        # Forward pass through the model
         quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
-        #corr_loss
-        point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
-        # # Compute pose loss
+        # Compute pose loss
         rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
-        # # Combine pose and correspondence loss
-        loss = rot_loss + trans_loss + beta*corr_loss 
+        # Compute the mean loss for the batch
+        rot_loss_mean = rot_loss.mean()  # Normalize rotation loss across the batch
+        trans_loss_mean = trans_loss.mean()  # Normalize translation loss across the batch
 
-        # # Backward pass and optimization step
+        # Combine the normalized losses if needed
+        total_loss = rot_loss_mean + trans_loss_mean        
+        # Combine pose and correspondence losses
+        loss = total_loss + beta * corr_loss
+
         loss.backward()
-        ########### clip gradients #################
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        running_loss += loss.item()
-        running_rot_loss += rot_loss.item()
-        running_trans_loss += trans_loss.item()
-        running_corr_loss += corr_loss.item()
-        running_point_error += point_error.item()
-        running_feature_consensus_error += feature_loss.item()
-        # print("$$$$ iteration runing loss $$$$$")
-        # print(running_loss)
-        # Print loss for every log_interval batches
-        if (batch_idx+1) % log_interval == 0:
-            print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.6f}')
+        total_loss += loss.item()
 
-            # Log the average loss for this epoch
-        # writer.add_scalar('Loss/train', avg_loss, epoch)
+        if batch_idx % log_interval == 0:
+            print(f'Epoch [{epoch + 1}], Batch [{batch_idx + 1}], Loss: {loss.item():.6f}')
 
-    # Return the average losses over the entire train dataset
-    avg_loss = running_loss / len(dataloader)
-    avg_rot_loss = running_rot_loss / len(dataloader)
-    avg_trans_loss = running_trans_loss / len(dataloader)
-    avg_corr_loss = running_corr_loss / len(dataloader)
-    avg_point_error = running_point_error / len(dataloader)
-    avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
-
-    print(f'Training Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f} | Corr loss: {corr_loss} | Feature error:  {avg_feature_consensus_error:.6f}')
-
+    avg_loss = total_loss / len(dataloader)
+    print(f'Epoch [{epoch + 1}], Average Loss: {avg_loss:.6f}')
     return avg_loss
 
 
 # Function to validate the model on the validation set
-def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
-    model.eval()  # Set model to evaluation mode
+def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=1):
+    model.eval()
     running_loss = 0.0
-    running_corr_loss = 0.0  # Track correspondence rank loss
-    running_rot_loss = 0.0  # Track pose rot loss
-    running_trans_loss = 0.0  # Track pose trans loss
+    running_corr_loss = 0.0
+    running_rot_loss = 0.0
+    running_trans_loss = 0.0
     running_point_error = 0.0
     running_feature_consensus_error = 0.0
 
-    with torch.no_grad():  # No need to track gradients during validation
-        for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            # Check if any returned data is None, and skip if so
-            if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
+    with torch.no_grad():
+        for batch_idx, (corr, labels, xyz_0, xyz_1, feat_0, feat_1, gt_pose) in enumerate(dataloader):
+            if any(x is None for x in [corr, labels, xyz_0, xyz_1, feat_0, feat_1, gt_pose]):
                 print(f"Skipping batch {batch_idx} due to missing data.")
-                continue  # Skip this batch
+                continue
 
-            # Move the data to the specified device (GPU/CPU)
-            corr = corr.to(device)
-            labels = labels.to(device)
-            xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-            feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
+            # Move data to the device
+            corr, labels = corr.to(device), labels.to(device)
+            xyz_0, xyz_1 = xyz_0.to(device), xyz_1.to(device)
+            feat_0, feat_1 = feat_0.to(device), feat_1.to(device)
             gt_pose = gt_pose.to(device)
 
-            # xyz_0, xyz_1 = center_and_normalize(xyz_0, xyz_1)
-            # print("################@@@@@@@@@@@@@@@@######################")
-            # print(xyz_0.shape)
-            # print(xyz_1.shape)
-            # print(feat_0.shape)
-            # print(feat_1.shape)
-    
-            # Initialize KNN graphs for source and target point clouds
+            # Compute KNN graphs
             k = 16
-            ####### remove the batch size when it is one ##############
-            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-                xyz_0 = xyz_0.squeeze(0)
-            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-                xyz_1 = xyz_1.squeeze(0)
-            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-                gt_pose = gt_pose.squeeze(0)
-            if corr.dim() == 3 and corr.size(0) == 1:
-                corr = corr.squeeze(0)
-            if labels.dim() == 3 and labels.size(0) == 1:
-                labels = labels.squeeze(0)
-
-            graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-            graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
+            graph_idx_0 = knn_graph(xyz_0.view(-1, xyz_0.size(-1)), k=k, loop=False, batch=xyz_0.shape[0])
+            graph_idx_1 = knn_graph(xyz_1.view(-1, xyz_1.size(-1)), k=k, loop=False, batch=xyz_1.shape[0])
 
             # Descriptor generation using PointNet or directly using feat_0/feat_1
             if use_pointnet:
                 feature_encoder = PointNet().to(device)
-                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # else:
-            #     feat_0 = feat_0  # Use pre-computed features directly
-            #     feat_1 = feat_1  # Use pre-computed features directly
+                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
+                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
 
-            if feat_0.dim() == 3 and feat_0.size(0) == 1:
-                feat_0 = feat_0.squeeze(0)
-            if feat_1.dim() == 3 and feat_1.size(0) == 1:
-                feat_1 = feat_1.squeeze(0)
+            # Extract edges and edge attributes
+            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), xyz_0.size(1))
+            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), xyz_1.size(1))
 
-            # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # Initialize edges and edge attributes for source and target
-            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
+            # Forward pass through the model
+            quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(
+                feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels
+            )
 
-            # # Forward pass through the model
-            quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
-            #corr_loss
+            # Compute additional losses
             point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
-            # # Compute pose loss
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
-            # # Combine pose and correspondence loss
-            loss = rot_loss + trans_loss + beta*corr_loss ########### trans_loss + beta*corr_loss
+            # Combine pose and correspondence loss
+            loss = rot_loss + trans_loss + beta * corr_loss
 
             # Accumulate losses
             running_loss += loss.item()
@@ -1019,7 +895,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
             running_point_error += point_error.item()
             running_feature_consensus_error += feature_loss.item()
 
-        # Return the average losses over the entire train dataset
+        # Compute average losses
         avg_loss = running_loss / len(dataloader)
         avg_rot_loss = running_rot_loss / len(dataloader)
         avg_trans_loss = running_trans_loss / len(dataloader)
@@ -1027,14 +903,12 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
         avg_point_error = running_point_error / len(dataloader)
         avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
 
-        print(f'Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | Point error: {avg_point_error:.6f}, Feature error:  {avg_feature_consensus_error:.6f}')
-    # # Log validation losses
-    # writer.add_scalar('Loss/validation', avg_loss, epoch)
-    # writer.add_scalar('Pose_Loss/validation', avg_pose_loss, epoch)
-    # writer.add_scalar('Correspondence_Loss/validation', avg_corr_loss, epoch)
-        avg_pose_loss = avg_rot_loss + avg_trans_loss
+        print(
+            f"Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | "
+            f"Point error: {avg_point_error:.6f} | Feature error: {avg_feature_consensus_error:.6f}"
+        )
 
-    return avg_loss, avg_pose_loss, avg_corr_loss, avg_point_error, avg_feature_consensus_error
+    return avg_loss, avg_rot_loss + avg_trans_loss, avg_corr_loss, avg_point_error, avg_feature_consensus_error
 
 # Save the checkpoint
 def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
@@ -1124,7 +998,6 @@ def load_checkpoint(checkpoint_path, pointnet=None, egnn=None, cross_attention=N
     # Return the epoch to resume training from
     return checkpoint, checkpoint.get('epoch', 0)
 
-# Main training loop
 def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device, writer, use_pointnet=False, log_interval=10, beta=0.1, save_path="./checkpoints"):
     """
     Train the model and save checkpoints during training.
@@ -1141,159 +1014,96 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
         save_path (str): Path to save the model checkpoints.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    # Create Adam optimizer with weight decay
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = StepLR(optimizer, step_size=25, gamma=0.1)
 
-    # Scheduler for decaying the learning rate every 15 epochs
-    scheduler = StepLR(optimizer, step_size=25, gamma=0.1)  # Gamma defines the decay factor
+    best_val_loss = float('inf')
 
-    # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
-    best_val_loss = float('inf')  # Track the best validation loss
-    val_loss = float('inf')
-    # If using PointNet encoder, initialize it separately
-    if use_pointnet:
-        pointnet = PointNet().to(device)
-    else:
-        pointnet = None  # No PointNet in this case
-
-    # Extract EGNN and CrossAttentionPoseRegression components from the model
-    egnn = model.egnn
-    cross_attention = model  # CrossAttentionPoseRegression is the top-level model
-
-    for epoch in range(num_epochs):
-        # Train for one epoch
-        print(f'\nEpoch {epoch + 1}/{num_epochs}')
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta)
-        
-        # Step the scheduler
-        scheduler.step()
-
-        # Print current learning rate for monitoring
-        current_lr = scheduler.get_last_lr()[0]
-        print(f"Epoch {epoch+1}/{num_epochs}, Current LR: {current_lr}")
-
-        # Validate every few epochs (e.g., every 5 epochs)
-        if (epoch + 1) % 1 == 0:
-            val_loss, val_pose_loss, val_corr_loss, avg_point_error, avg_feature_consensus_error = validate(model, val_loader, device, epoch, writer, use_pointnet)
-            print(val_loss)
-            print(f'Epoch {epoch + 1}/{num_epochs} - Eva Avg Loss: {val_loss:.6f}, Validation Avg Loss: {val_pose_loss:.6f}, Val corr loss: {val_corr_loss: 6f}')
-        else:
-            print(f'Epoch {epoch + 1}/{num_epochs} - Eva Avg Loss: {val_loss:.6f}')
-
-        # Save the checkpoint if the validation loss is the best so far
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, save_path, is_best=True, use_pointnet=use_pointnet)
-            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.6f}')
-
-        # Save checkpoint every 16 epochs
-        if (epoch + 1) % 20 == 0 or (epoch + 1) == num_epochs:
-            checkpoint_path = save_path  #"./checkpoints"
-            save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
-
-def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=False):
-    """
-    Evaluate the model using a saved checkpoint, and print the predicted pose as a homogeneous transform matrix.
-
-    Args:
-        checkpoint_path (str): Path to the checkpoint to be loaded.
-        model (torch.nn.Module): The model to be evaluated.
-        dataloader (torch.utils.data.DataLoader): Dataloader for the evaluation data.
-        device (torch.device): Device to run evaluation on (e.g., 'cuda' or 'cpu').
-        use_pointnet (bool): Whether to use PointNet encoder.
-
-    Returns:
-        float: The average loss over the evaluation dataset.
-    """
-    # Load the checkpoint and restore the model's weights
-    egnn = model.egnn
-    cross_attention = model  # CrossAttentionPoseRegression is the top-level model
-
-    # If using PointNet, define the PointNet encoder
     if use_pointnet:
         pointnet = PointNet().to(device)
     else:
         pointnet = None
 
-    # Load the checkpoint
+    for epoch in range(num_epochs):
+        print(f'\nEpoch {epoch + 1}/{num_epochs}')
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta)
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        print(f"Epoch {epoch+1}/{num_epochs}, Current LR: {current_lr}")
+
+        if (epoch + 1) % 1 == 0:
+            val_loss, val_pose_loss, val_corr_loss, avg_point_error, avg_feature_consensus_error = validate(model, val_loader, device, epoch, writer, use_pointnet)
+            print(f'Epoch {epoch + 1}/{num_epochs} - Validation Loss: {val_loss:.6f}')
+        else:
+            print(f'Epoch {epoch + 1}/{num_epochs} - Validation Loss: {val_loss:.6f}')
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(epoch + 1, pointnet, model.egnn, model, optimizer, save_path, is_best=True, use_pointnet=use_pointnet)
+            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.6f}')
+
+        if (epoch + 1) % 20 == 0 or (epoch + 1) == num_epochs:
+            save_checkpoint(epoch + 1, pointnet, model.egnn, model, optimizer, save_path, use_pointnet=use_pointnet)
+
+def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=False):
+    egnn = model.egnn
+    cross_attention = model
+
+    if use_pointnet:
+        pointnet = PointNet().to(device)
+    else:
+        pointnet = None
+
     _, epoch = load_checkpoint(checkpoint_path, pointnet, egnn, cross_attention, optimizer=None, use_pointnet=use_pointnet, device=device)
     print(f"Checkpoint loaded from epoch {epoch}")
 
-    # Set the model to evaluation mode
     model.eval()
-
     total_loss = 0.0
     total_pose_loss = 0.0
     total_corr_loss = 0.0
     num_batches = 0
 
-    with torch.no_grad():  # Disable gradient calculation for evaluation
+    with torch.no_grad():
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            # Skip batches with missing data
             if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
                 continue
 
-            # Move data to the device
             corr = corr.to(device)
             labels = labels.to(device)
             xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
             feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
             gt_pose = gt_pose.to(device)
 
-            # KNN graph computation (same as in training)
             k = 12
             graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
             graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
 
-            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-                xyz_0 = xyz_0.squeeze(0)
-            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-                xyz_1 = xyz_1.squeeze(0)
-            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-                gt_pose = gt_pose.squeeze(0)
-            if corr.dim() == 3 and corr.size(0) == 1:
-                corr = corr.squeeze(0)
-            if labels.dim() == 3 and labels.size(0) == 1:
-                labels = labels.squeeze(0)
-                
-            # Descriptor generation using PointNet or pre-computed features
             if use_pointnet:
                 feat_0 = pointnet(xyz_0, graph_idx_0, None)
                 feat_1 = pointnet(xyz_1, graph_idx_1, None)
 
-            # Get edges and edge attributes
             edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
             edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
 
-            # Forward pass through the model (no backprop in evaluation)
             quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
 
-            # Convert quaternion and translation to a homogeneous transform matrix
-            for i in range(quaternion.size(0)):  # Process each batch item
-                rot_matrix = quaternion_to_matrix(quaternion[i], device=device)  # Ensure quaternion to matrix is on the correct device
+            for i in range(quaternion.size(0)):
+                rot_matrix = quaternion_to_matrix(quaternion[i], device=device)
                 trans_vector = translation[i]
 
-                # Create a 4x4 homogeneous transformation matrix
-                hom_matrix = torch.eye(4, device=device)  # Create on device
+                hom_matrix = torch.eye(4, device=device)
                 hom_matrix[:3, :3] = rot_matrix
                 hom_matrix[:3, 3] = trans_vector
 
                 print(f"Predicted Pose (Batch {batch_idx}, Item {i}):")
                 print(hom_matrix)
 
-            # Compute pose loss
             pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
-
-            # Combine pose and correspondence losses
             loss = pose_losses + corr_loss
             total_loss += loss.item()
             total_pose_loss += pose_losses.item()
             total_corr_loss += corr_loss.item()
             num_batches += 1
 
-    # Calculate average losses
     avg_loss = total_loss / num_batches
     avg_pose_loss = total_pose_loss / num_batches
     avg_corr_loss = total_corr_loss / num_batches
@@ -1306,7 +1116,7 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')

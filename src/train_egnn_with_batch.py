@@ -465,6 +465,8 @@ def quaternion_to_matrix(quaternion):
         torch.Tensor: A tensor of shape (B, 3, 3) containing the rotation matrices.
     """
     # Split the quaternion components
+    print("#############")
+    print(quaternion.shape)
     w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
     
     # Compute the individual terms for the rotation matrix
@@ -630,6 +632,10 @@ class CrossAttentionPoseRegression(nn.Module):
         # Compute similarity matrix for compressed features
         sim_matrix = torch.matmul(compressed_h_src_norm, compressed_h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         sim_matrix = F.softmax(sim_matrix, dim=-1)
+        sim_matrix = F.softmax(sim_matrix, dim=-2)
+
+        # Normalize the similarity matrix for numerical stability
+        # sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
 
         # Singular Value Decomposition (SVD)
         u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
@@ -651,10 +657,10 @@ class CrossAttentionPoseRegression(nn.Module):
         combined_features_flat = combined_features.view(batch_size, -1)
 
         # Regress pose (quaternion + translation)
-        print("!!!!!!!!!!!!!!!")
-        print(combined_features.shape)
-        print(top_k_sum.shape)
-        print(combined_features_flat.shape)
+        # print("!!!!!!!!!!!!!!!")
+        # print(combined_features.shape)
+        # print(top_k_sum.shape)
+        # print(combined_features_flat.shape)
         pose = self.mlp_pose(combined_features_flat)  # Shape: [B, 7]
         quaternion = F.normalize(pose[:, :4], p=2, dim=-1)  # Normalize quaternion
         translation = pose[:, 4:]
@@ -741,9 +747,9 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     # Convert predicted quaternion to rotation matrix
     pred_rotation = quaternion_to_matrix(pred_quaternion)  # Shape: [B, 3, 3]
 
-    print("@@@@@@@@@@@@@@")
-    print(pred_rotation.shape)
-    print(gt_rotation.shape)
+    # print("@@@@@@@@@@@@@@")
+    # print(pred_rotation.shape)
+    # print(gt_rotation.shape)
     # Compute geodesic rotation loss
     # Compute the batched rotation loss
     # Compute rotation loss
@@ -849,32 +855,40 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
     running_feature_consensus_error = 0.0
 
     with torch.no_grad():
-        for batch_idx, (corr, labels, xyz_0, xyz_1, feat_0, feat_1, gt_pose) in enumerate(dataloader):
+        for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
             if any(x is None for x in [corr, labels, xyz_0, xyz_1, feat_0, feat_1, gt_pose]):
                 print(f"Skipping batch {batch_idx} due to missing data.")
                 continue
 
             # Move data to the device
-            corr, labels = corr.to(device), labels.to(device)
-            xyz_0, xyz_1 = xyz_0.to(device), xyz_1.to(device)
-            feat_0, feat_1 = feat_0.to(device), feat_1.to(device)
+            corr = corr.to(device)
+            labels = labels.to(device)
+            xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
+            feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
             gt_pose = gt_pose.to(device)
 
-            # Compute KNN graphs
-            k = 16
-            graph_idx_0 = knn_graph(xyz_0.view(-1, xyz_0.size(-1)), k=k, loop=False, batch=xyz_0.shape[0])
-            graph_idx_1 = knn_graph(xyz_1.view(-1, xyz_1.size(-1)), k=k, loop=False, batch=xyz_1.shape[0])
+            # # Compute KNN graphs
+            # k = 16
+            # graph_idx_0 = knn_graph(
+            #     xyz_0.view(-1, xyz_0.size(-1)), k=k, loop=False, batch=torch.repeat_interleave(xyz_0.shape[1], xyz_0.shape[0])
+            # )
+            # graph_idx_1 = knn_graph(
+            #     xyz_1.view(-1, xyz_1.size(-1)), k=k, loop=False, batch=torch.repeat_interleave(xyz_1.shape[1], xyz_1.shape[0])
+            # )
 
-            # Descriptor generation using PointNet or directly using feat_0/feat_1
-            if use_pointnet:
-                feature_encoder = PointNet().to(device)
-                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
-                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
+            # # Descriptor generation using PointNet or directly using feat_0/feat_1
+            # if use_pointnet:
+            #     feature_encoder = PointNet().to(device)
+            #     feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
+            #     feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
 
-            # Extract edges and edge attributes
-            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), xyz_0.size(1))
-            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), xyz_1.size(1))
-
+            # # Extract edges and edge attributes
+            # edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), xyz_0.size(1))
+            # edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), xyz_1.size(1))
+            edges_0 = None
+            edge_attr_0 = None
+            edges_1 = None
+            edge_attr_1 = None
             # Forward pass through the model
             quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(
                 feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels
@@ -885,23 +899,24 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
-            loss = rot_loss + trans_loss + beta * corr_loss
+            loss = rot_loss.mean() + trans_loss.mean() + beta * corr_loss.mean()
 
             # Accumulate losses
             running_loss += loss.item()
-            running_rot_loss += rot_loss.item()
-            running_trans_loss += trans_loss.item()
-            running_corr_loss += corr_loss.item()
-            running_point_error += point_error.item()
-            running_feature_consensus_error += feature_loss.item()
+            running_rot_loss += rot_loss.mean().item()
+            running_trans_loss += trans_loss.mean().item()
+            running_corr_loss += corr_loss.mean().item()
+            running_point_error += point_error.mean().item()
+            running_feature_consensus_error += feature_loss.mean().item()
 
         # Compute average losses
-        avg_loss = running_loss / len(dataloader)
-        avg_rot_loss = running_rot_loss / len(dataloader)
-        avg_trans_loss = running_trans_loss / len(dataloader)
-        avg_corr_loss = running_corr_loss / len(dataloader)
-        avg_point_error = running_point_error / len(dataloader)
-        avg_feature_consensus_error = running_feature_consensus_error / len(dataloader)
+        num_batches = len(dataloader)
+        avg_loss = running_loss / num_batches
+        avg_rot_loss = running_rot_loss / num_batches
+        avg_trans_loss = running_trans_loss / num_batches
+        avg_corr_loss = running_corr_loss / num_batches
+        avg_point_error = running_point_error / num_batches
+        avg_feature_consensus_error = running_feature_consensus_error / num_batches
 
         print(
             f"Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | "
@@ -1116,7 +1131,7 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=48, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')

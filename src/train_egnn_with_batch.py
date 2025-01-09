@@ -465,8 +465,6 @@ def quaternion_to_matrix(quaternion):
         torch.Tensor: A tensor of shape (B, 3, 3) containing the rotation matrices.
     """
     # Split the quaternion components
-    print("#############")
-    print(quaternion.shape)
     w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
     
     # Compute the individual terms for the rotation matrix
@@ -632,29 +630,41 @@ class CrossAttentionPoseRegression(nn.Module):
         # Compute similarity matrix for compressed features
         sim_matrix = torch.matmul(compressed_h_src_norm, compressed_h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         sim_matrix = F.softmax(sim_matrix, dim=-1)
-        sim_matrix = F.softmax(sim_matrix, dim=-2)
 
-        # Normalize the similarity matrix for numerical stability
-        # sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
+        # Add numerical stability by scaling and normalizing
+        sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
+
+        # Placeholder for batch loss
+        batch_loss = None
 
         # Singular Value Decomposition (SVD)
-        u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
-        top_k_sum = s[:, :35].sum(dim=-1)  # Sum of top-k singular values# Target tensor with the same shape, each value is 12.0
-        target = torch.full_like(top_k_sum, 35.0).to(self.device) # Shape [4], all elements are 35.0
+        try:
+            # Switch to `torch.linalg.svd` for better numerical stability
+            u, s, v = torch.linalg.svd(sim_matrix, full_matrices=False)  # u: [B, N, N], s: [B, N], v: [B, N, N]
 
-        # Compute the batch loss
-        batch_loss = F.mse_loss(top_k_sum, target)
+            # Top-k singular values sum
+            top_k_sum = s[:, :12].sum(dim=-1)  # Sum of top-12 singular values
+            target = torch.full_like(top_k_sum, 12.0).to(self.device)  # Target tensor, shape [B]
 
-        # Total loss
-        total_corr_loss = batch_loss    # + corr_loss
+            # Compute batch loss
+            batch_loss = F.mse_loss(top_k_sum, target)
+
+        except RuntimeError as e:
+            print(f"SVD failed for some batches: {e}")
+            # Gracefully handle failed SVD by skipping or setting a default value
+            batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+        # Total correspondence loss
+        total_corr_loss = batch_loss
 
         # Weighted features
         weighted_h_src = torch.matmul(sim_matrix.transpose(-1, -2), compressed_h_src)  # Shape: [B, N, D]
         weighted_h_tgt = torch.matmul(sim_matrix, compressed_h_tgt)  # Shape: [B, N, D]
 
         # Flatten combined features
-        combined_features = torch.cat([weighted_h_src, weighted_h_tgt], dim=-1)
-        combined_features_flat = combined_features.view(batch_size, -1)
+        combined_features = torch.cat([compressed_h_src_norm, compressed_h_tgt_norm], dim=-1)
+        combined_features_flat = combined_features.view(compressed_h_src.size(0), -1)
+
 
         # Regress pose (quaternion + translation)
         # print("!!!!!!!!!!!!!!!")
@@ -705,9 +715,9 @@ def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt
     point_error = torch.mean(valid_distances) if valid_distances.numel() > 0 else torch.tensor(0.0, device=device)
 
     # Apply LayerNorm for feature stability
-    layer_norm = nn.LayerNorm(h_src_norm.shape[-1]).to(device)  # Assumes last dim is feature size
-    h_src_norm = layer_norm(h_src_norm)
-    h_tgt_norm = layer_norm(h_tgt_norm)
+    # layer_norm = nn.LayerNorm(h_src_norm.shape[-1]).to(device)  # Assumes last dim is feature size
+    # h_src_norm = layer_norm(h_src_norm)
+    # h_tgt_norm = layer_norm(h_tgt_norm)
 
     # Compute feature loss
     feature_loss = torch.mean(
@@ -769,6 +779,9 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     cosine_similarity = dot_product / (norm_pred * norm_gt)             # Shape: [B]
 
     translation_loss = torch.arccos(torch.clamp(cosine_similarity, min=-1, max=1))  # Shape: [B]
+    print("####### !!! #######")
+    print(rotation_loss.shape)
+    print(translation_loss.shape)
 
     return rotation_loss, translation_loss
 
@@ -827,7 +840,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         trans_loss_mean = trans_loss.mean()  # Normalize translation loss across the batch
 
         # Combine the normalized losses if needed
-        total_loss = rot_loss_mean + trans_loss_mean        
+        total_loss = rot_loss_mean + trans_loss_mean    
+        print("#####################")
+        print(rot_loss_mean)
+        print(trans_loss_mean)
+        print(beta)    
         # Combine pose and correspondence losses
         loss = total_loss + beta * corr_loss
 
@@ -856,7 +873,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
 
     with torch.no_grad():
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            if any(x is None for x in [corr, labels, xyz_0, xyz_1, feat_0, feat_1, gt_pose]):
+            if any(x is None for x in [corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose]):
                 print(f"Skipping batch {batch_idx} due to missing data.")
                 continue
 
@@ -889,13 +906,15 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             edge_attr_0 = None
             edges_1 = None
             edge_attr_1 = None
+            point_error = None
+            feature_loss = None
             # Forward pass through the model
             quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(
                 feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels
             )
 
             # Compute additional losses
-            point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
+            # point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
@@ -906,8 +925,8 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             running_rot_loss += rot_loss.mean().item()
             running_trans_loss += trans_loss.mean().item()
             running_corr_loss += corr_loss.mean().item()
-            running_point_error += point_error.mean().item()
-            running_feature_consensus_error += feature_loss.mean().item()
+            # running_point_error += point_error.mean().item()
+            # running_feature_consensus_error += feature_loss.mean().item()
 
         # Compute average losses
         num_batches = len(dataloader)
@@ -915,15 +934,15 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
         avg_rot_loss = running_rot_loss / num_batches
         avg_trans_loss = running_trans_loss / num_batches
         avg_corr_loss = running_corr_loss / num_batches
-        avg_point_error = running_point_error / num_batches
-        avg_feature_consensus_error = running_feature_consensus_error / num_batches
+        # avg_point_error = running_point_error / num_batches
+        # avg_feature_consensus_error = running_feature_consensus_error / num_batches
 
         print(
-            f"Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} | "
-            f"Point error: {avg_point_error:.6f} | Feature error: {avg_feature_consensus_error:.6f}"
+            f"Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} "
+            # f"Point error: {avg_point_error:.6f} | Feature error: {avg_feature_consensus_error:.6f}"
         )
 
-    return avg_loss, avg_rot_loss + avg_trans_loss, avg_corr_loss, avg_point_error, avg_feature_consensus_error
+    return avg_loss, avg_rot_loss + avg_trans_loss, avg_corr_loss, point_error, feature_loss  #, avg_point_error, avg_feature_consensus_error
 
 # Save the checkpoint
 def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
@@ -1150,7 +1169,7 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # print("###edge batch begins 2###########")
+    # print("###edge batch begins ###########")
     # # Set up the data and training parameters
     # Load the arguments
     base_dir = args.base_dir

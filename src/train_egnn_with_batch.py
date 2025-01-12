@@ -49,68 +49,40 @@ from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual 
 
 torch.cuda.manual_seed(2)
 
+
 class PointNetLayer(MessagePassing):
     def __init__(self, in_channels: int, out_channels: int):
-        # Message passing with "max" aggregation.
-        super().__init__(aggr='max')
-        # Initialization of the MLP:
-        # Here, the number of input features correspond to the hidden
-        # node dimensionality plus point dimensionality (=3).
+        super().__init__(aggr='max')  # "max" aggregation
         self.mlp = nn.Sequential(
             nn.Linear(in_channels + 3, out_channels),
             nn.ReLU(),
             nn.Linear(out_channels, out_channels),
         )
 
-    def forward(self,
-        h: Tensor,
-        pos: Tensor,
-        edge_index: Tensor,
-    ) -> Tensor:
-        # Start propagating messages.
+    def forward(self, h: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # Start propagating messages
         return self.propagate(edge_index, h=h, pos=pos)
 
-    def message(self,
-        h_j: Tensor,
-        pos_j: Tensor,
-        pos_i: Tensor,
-    ) -> Tensor:
-        # h_j: The features of neighbors as shape [num_edges, in_channels]
-        # pos_j: The position of neighbors as shape [num_edges, 3]
-        # pos_i: The central node position as shape [num_edges, 3]
-
+    def message(self, h_j: torch.Tensor, pos_j: torch.Tensor, pos_i: torch.Tensor) -> torch.Tensor:
+        # Concatenate features with relative positional differences
         edge_feat = torch.cat([h_j, pos_j - pos_i], dim=-1)
         return self.mlp(edge_feat)
 
 
-class PointNet(torch.nn.Module):
+class PointNet(nn.Module):
     def __init__(self, in_num_feature=3, hidden_num_feature=32, output_num_feature=32, device='cuda:0'):
         super().__init__()
         self.hidden_num_feature = hidden_num_feature
-        self.conv1 = PointNetLayer(in_num_feature, self.hidden_num_feature)
-        self.conv2 = PointNetLayer(self.hidden_num_feature, output_num_feature)
-        # self.conv3 = PointNetLayer(2*self.hidden_num_feature, output_num_feature)
+        self.conv1 = PointNetLayer(in_num_feature, hidden_num_feature)
+        self.conv2 = PointNetLayer(hidden_num_feature, output_num_feature)
         self.device = device
-        
-    def forward(self,
-        pos: Tensor,
-        edge_index: Tensor,
-        batch: Tensor,
-    ) -> Tensor:
 
-        # Perform two-layers of message passing:
+    def forward(self, pos: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+        # Perform two layers of message passing
         h = self.conv1(h=pos, pos=pos, edge_index=edge_index)
         h = h.relu()
         h = self.conv2(h=h, pos=pos, edge_index=edge_index)
         h = h.relu()
-        # h = self.conv2(h=h, pos=pos, edge_index=edge_index)
-        # h = h.relu()
-        
-        # h = self.conv3(h=h, pos=pos, edge_index=edge_index)
-        # h = h.relu()
-        # Global Pooling:
-        #h = global_max_pool(h, batch)  # [num_examples, hidden_channels]
-        self.to(self.device)
         return h
 
 class SO3TensorProductLayer(nn.Module):
@@ -588,16 +560,18 @@ class CrossAttentionPoseRegression(nn.Module):
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
         batch_size = h_src.size(0)
-
+        print("######### source and target point features #########")
+        print(h_src)
+        print(h_tgt)
         # Normalize features
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
         h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
 
-        h_src = h_src_norm
-        h_tgt = h_tgt_norm
+        # h_src = h_src_norm
+        # h_tgt = h_tgt_norm
         # # # Concatenate features with coordinates
-        # h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
-        # h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
+        h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
+        h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
 
         # # Normalize features for Hadamard product (L2 normalization)
         # h_src = F.normalize(h_src, p=2, dim=-1)
@@ -606,9 +580,6 @@ class CrossAttentionPoseRegression(nn.Module):
         large_sim_matrix = torch.matmul(h_src_norm, h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         large_sim_matrix = F.softmax(large_sim_matrix, dim=-1)
         u1, s1, v1 = torch.svd(large_sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
-        print("@@@@@@@ $$$$$$ @@@@@")
-        print(h_src)
-        print(h_tgt)
 
         corr_indices = corr.long()  # Shape: [B, M, 2]
         labels = labels.long()  # Shape: [B, M]
@@ -639,8 +610,8 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # Add numerical stability by scaling and normalizing
         # sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
-        print("@@@@@@@ !!! @@@@@")
-        print(sim_matrix[6, : , :])
+        # print("@@@@@@@ !!! @@@@@")
+        # print(sim_matrix[6, : , :])
         # Placeholder for batch loss
         batch_loss = None
 
@@ -672,10 +643,10 @@ class CrossAttentionPoseRegression(nn.Module):
         # Flatten combined features
         combined_features = torch.cat([compressed_h_src_norm, compressed_h_tgt_norm], dim=-1)
         combined_features_flat = combined_features.view(compressed_h_src.size(0), -1)
-        print("@@@@@@@@@@@@@@@@")
-        print(s)
-        print(combined_features_flat.shape)
-        print(self.hidden_nf)
+        # print("@@@@@@@@@@@@@@@@")
+        # print(s)
+        # print(combined_features_flat.shape)
+        # print(self.hidden_nf)
         # Regress pose (quaternion + translation)
         # print("!!!!!!!!!!!!!!!")
         # print(combined_features.shape)
@@ -821,16 +792,34 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # # Create the batch tensor for KNN graph
         # batch_tensor = torch.arange(batch_size, device=device).repeat_interleave(num_points)
 
-        # # Compute KNN graphs
-        # k = 12
-        # graph_idx_0 = knn_graph(xyz_0_flat, k=k, loop=False, batch=batch_tensor)  # Batch-aware KNN
-        # graph_idx_1 = knn_graph(xyz_1_flat, k=k, loop=False, batch=batch_tensor)
+        # Compute KNN graphs
+        # Input: xyz_0 and xyz_1 are tensors of shape [batch_size, 2048, 3]
+        batch_size, num_points, _ = xyz_0.shape
 
-        # # If using PointNet, encode the features
-        # if use_pointnet:
-        #     feature_encoder = PointNet().to(device)
-        #     feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
-        #     feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
+        # Prepare batch indices for k-NN computation
+        batch_indices = torch.arange(batch_size).repeat_interleave(num_points).to(xyz_0.device)  # [batch_size * 2048]
+
+        # Flatten the batch dimensions
+        xyz_0_flat = xyz_0.view(-1, 3)  # Shape: [batch_size * 2048, 3]
+        xyz_1_flat = xyz_1.view(-1, 3)  # Shape: [batch_size * 2048, 3]
+
+        # Construct k-NN graphs while keeping points from different batches independent
+        k = 12
+        graph_idx_0 = knn_graph(xyz_0_flat, k=k, batch=batch_indices, loop=False)
+        graph_idx_1 = knn_graph(xyz_1_flat, k=k, batch=batch_indices, loop=False)
+
+        # If using PointNet, encode the features
+        if use_pointnet:
+            # Use the updated PointNet model
+            pointnet = PointNet(in_num_feature=3, hidden_num_feature=32, output_num_feature=32, device=xyz_0.device).to(device)
+
+            # Compute features
+            feat_0 = pointnet(xyz_0_flat, graph_idx_0, batch_indices).view(batch_size, num_points, -1)  # [batch_size, 2048, 32]
+            feat_1 = pointnet(xyz_1_flat, graph_idx_1, batch_indices).view(batch_size, num_points, -1)  # [batch_size, 2048, 32]
+
+            # feature_encoder = PointNet().to(device)
+            # feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
+            # feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
 
         # # Generate edges and edge attributes
         # edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0_flat.size(0), 1)
@@ -1160,14 +1149,14 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=12, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=24, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
@@ -1266,7 +1255,7 @@ if __name__ == "__main__":
     ##########comment these lines during evaluation mode#################
     if mode == "train":
         train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
-                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
+                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=True, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
         avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)

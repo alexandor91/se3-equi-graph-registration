@@ -583,8 +583,8 @@ class CrossAttentionPoseRegression(nn.Module):
 
         self.mlp_compress.apply(init_layer)
         self.mlp_pose.apply(init_layer)
-        self.shared_mlp_decoder.apply(init_layer)
-        self.shallow_mlp_pose.apply(init_layer)
+        # self.shared_mlp_decoder.apply(init_layer)
+        # self.shallow_mlp_pose.apply(init_layer)
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
         batch_size = h_src.size(0)
@@ -593,16 +593,22 @@ class CrossAttentionPoseRegression(nn.Module):
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
         h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
 
-        # Concatenate features with coordinates
-        h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
-        h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
+        h_src = h_src_norm
+        h_tgt = h_tgt_norm
+        # # # Concatenate features with coordinates
+        # h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
+        # h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
 
         # # Normalize features for Hadamard product (L2 normalization)
-        h_src = F.normalize(h_src, p=2, dim=-1)
-        h_tgt = F.normalize(h_tgt, p=2, dim=-1)
+        # h_src = F.normalize(h_src, p=2, dim=-1)
+        # h_tgt = F.normalize(h_tgt, p=2, dim=-1)
         # Compute similarity matrix
         large_sim_matrix = torch.matmul(h_src_norm, h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         large_sim_matrix = F.softmax(large_sim_matrix, dim=-1)
+        u1, s1, v1 = torch.svd(large_sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
+        print("@@@@@@@ $$$$$$ @@@@@")
+        print(h_src)
+        print(h_tgt)
 
         corr_indices = corr.long()  # Shape: [B, M, 2]
         labels = labels.long()  # Shape: [B, M]
@@ -632,19 +638,20 @@ class CrossAttentionPoseRegression(nn.Module):
         sim_matrix = F.softmax(sim_matrix, dim=-1)
 
         # Add numerical stability by scaling and normalizing
-        sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
-
+        # sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
+        print("@@@@@@@ !!! @@@@@")
+        print(sim_matrix[6, : , :])
         # Placeholder for batch loss
         batch_loss = None
 
         # Singular Value Decomposition (SVD)
         try:
             # Switch to `torch.linalg.svd` for better numerical stability
-            u, s, v = torch.linalg.svd(sim_matrix, full_matrices=False)  # u: [B, N, N], s: [B, N], v: [B, N, N]
+            u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
 
             # Top-k singular values sum
-            top_k_sum = s[:, :12].sum(dim=-1)  # Sum of top-12 singular values
-            target = torch.full_like(top_k_sum, 12.0).to(self.device)  # Target tensor, shape [B]
+            top_k_sum = s[:, :35].sum(dim=-1)  # Sum of top-12 singular values
+            target = torch.full_like(top_k_sum, 35.0).to(self.device)  # Target tensor, shape [B]
 
             # Compute batch loss
             batch_loss = F.mse_loss(top_k_sum, target)
@@ -664,8 +671,10 @@ class CrossAttentionPoseRegression(nn.Module):
         # Flatten combined features
         combined_features = torch.cat([compressed_h_src_norm, compressed_h_tgt_norm], dim=-1)
         combined_features_flat = combined_features.view(compressed_h_src.size(0), -1)
-
-
+        print("@@@@@@@@@@@@@@@@")
+        print(s)
+        print(combined_features_flat.shape)
+        print(self.hidden_nf)
         # Regress pose (quaternion + translation)
         # print("!!!!!!!!!!!!!!!")
         # print(combined_features.shape)
@@ -846,7 +855,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         print(trans_loss_mean)
         print(beta)    
         # Combine pose and correspondence losses
-        loss = total_loss + beta * corr_loss
+        loss = total_loss #+ beta * corr_loss
 
         loss.backward()
         optimizer.step()
@@ -918,7 +927,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
-            loss = rot_loss.mean() + trans_loss.mean() + beta * corr_loss.mean()
+            loss = rot_loss.mean() + trans_loss.mean() #+ beta * corr_loss.mean()
 
             # Accumulate losses
             running_loss += loss.item()
@@ -1150,14 +1159,14 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=48, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=12, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')

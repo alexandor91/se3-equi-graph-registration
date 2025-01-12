@@ -648,6 +648,7 @@ class CrossAttentionPoseRegression(nn.Module):
         try:
             # Switch to `torch.linalg.svd` for better numerical stability
             u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
+            sim_matrix += torch.eye(sim_matrix.size(-1), device=sim_matrix.device) * 1e-6
 
             # Top-k singular values sum
             top_k_sum = s[:, :35].sum(dim=-1)  # Sum of top-12 singular values

@@ -443,7 +443,7 @@ class ThreeDMatchTest(data.Dataset):
             self.test_file_list = [line.strip() for line in f.readlines()]
 
     def __getitem__(self, index):
-        file_name = self.file_list[index]
+        file_name = self.test_file_list[index]
 
         # Load data from .pkl file
         with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:

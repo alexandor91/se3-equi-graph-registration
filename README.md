@@ -60,11 +60,15 @@ One more thing to the training of custom dataset training, you can set "use_poin
 tensorboard logs are exported under "./runs" directory relative to the run script.
 
 ## Evaluation
+Put your best trained checkpoint under "./src/checkpoints/"  directory,
 
-In same train_eval_egnn.py, set the "mode" variable in the main function to "test" mode, then run it to load the test data for evaluation.
+For online test mode, In same "src folder"  in "eval_egnn_metrics.py", set the "mode" variable in the main function to "test" mode (default is "test"), then run it to load the test split data for evaluation.
 
-For metric results generation, use the `evaluation.py` script located in the `tools` folder to load the saved results of model output in inference model and compared the results under a specified directorh against another directory of gt poses:
-$python tools/evaluation_metrics.py
+$python src/eval_egnn_metrics.py
+
+Find the average results saved in "output/evaluation_results.txt"
+
+Optionally, For metric results offline generation, use the `evaluation_metrics.py` script located in the `tools` folder to read the saved results saved in txt or pkl of model output in test mode, and compared the results under a specified directorh against another directory of gt poses.
 
 ## Citation
 

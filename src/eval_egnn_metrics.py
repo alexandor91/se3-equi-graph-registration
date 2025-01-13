@@ -42,7 +42,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 # Add the project root to the Python path
 sys.path.insert(0, project_root)
 
-from tools.evaluation_metrics import calculate_pose_error, registration_recall  #####, evaluate_pairwise_frames
+from tools.evaluation_metrics import calculate_pose_error, registration_recall, quat_to_mat  #####, evaluate_pairwise_frames
 # Now you can import from datasets
 from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
@@ -716,251 +716,6 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     
     return total_loss    
 
-# Function to train for one epoch
-def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_pointnet=False, log_interval=1, beta=0.1):
-    model.train()
-    running_loss = 0.0
-    running_corr_loss = 0.0  # Track correspondence rank loss
-    running_pose_loss = 0.0  # Track pose loss
-
-    for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-        # Check if any returned data is None, and skip if so
-        if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-            print(f"Skipping batch {batch_idx} due to missing data.")
-            continue  # Skip this batch
-
-        # Move the data to the specified device (GPU/CPU)
-        corr = corr.to(device)
-        labels = labels.to(device)
-        xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-        xyz_0_center = src_pts.mean(dim=1, keepdim=True).to(device)
-        xyz_1_center = tar_pts.mean(dim=1, keepdim=True).to(device)
-        xyz_0 = xyz_0 - xyz_0_center
-        xyz_1 = xyz_1 - xyz_1_center
-        scale1 = xyz_0.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
-        scale2 = xyz_1.norm(dim=2).max(dim=1, keepdim=True).values.to(device)
-        # xyz_0 = xyz_0 / scale1
-        # xyz_1 = xyz_1/ scale2
-        feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
-        gt_pose = gt_pose.to(device)
-        R = gt_pose[:, :3, :3].to(device)
-        T = gt_pose[:, :3, 3].to(device)
-        # Adjust xyz_0_center to match R's expected shape
-        # Ensure xyz_0_center is of shape [1, 3, 1]
-        xyz_0_center = xyz_0_center.squeeze(1).unsqueeze(-1)  # From [1, 1, 3] -> [1, 3] -> [1, 3, 1]
-
-        # Ensure xyz_1_center is of shape [1, 3, 1]
-        xyz_1_center = xyz_1_center.squeeze(1).unsqueeze(-1)  # From [1, 1, 3] -> [1, 3] -> [1, 3, 1]
-
-        # Ensure T is of shape [1, 3, 1]
-        T = T.unsqueeze(-1)  # From [1, 3] -> [1, 3, 1]
-
-        # Perform the computation
-        T_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center)).to(device)  # Result shape: [1, 3, 1]
-        gt_pose[:, :3, :3] = R
-        gt_pose[:, :3, 3] = T_norm.transpose(1, 2)
-        # T = T.squeeze(-1)  # Shape: [B, 3] -> T is already [B, 3, 1], no need for transpose.
-        # T = T.transpose(1, 2) 
-        # print(R.shape)
-        # print(T.shape)
-        # print(xyz_0_center.shape)
-        # print(gt_pose.shape)
-        # # gt_pose_norm = (gt_pose - xyz_1_center + R @ xyz_0_center.T) /scale2
-        # gt_pose_norm = (T - xyz_1_center + torch.bmm(R, xyz_0_center.T)).to(device)
-        # gt_pose = gt_pose_norm
-
-        # # Step 1: Append a homogeneous coordinate (1) to xyz_0
-        # ones = torch.ones(1, xyz_0.size(1), 1, device=xyz_0.device)  # Shape: 1 x N x 1
-        # xyz_homo = torch.cat([xyz_0, ones], dim=-1)  # Shape: 1 x N x 4
-
-        # # Step 2: Apply the extrinsic transformation
-        # xyz_transformed_homo = torch.matmul(xyz_homo, gt_pose)  # Shape: 1 x N x 4
-
-        # # Step 3: Convert back to 3D by dropping the homogeneous coordinate
-        # xyz_transformed = xyz_transformed_homo[..., :3]  # Shape: 1 x N x 3
-        # xyz_diff = xyz_transformed - xyz_1
-        # print("################@@@@@@@@@@@@@@@@######################")
-        # # print(xyz_0)
-        # # print(xyz_1)
-        # # print(feat_0)
-        # # print(feat_1)
-        # print(xyz_diff)
-        # Initialize KNN graphs for source and target point clouds
-        k = 12
-        ####### remove the batch size when it is one ##############
-        # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-        if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-            xyz_0 = xyz_0.squeeze(0)
-        if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-            xyz_1 = xyz_1.squeeze(0)
-        if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-            gt_pose = gt_pose.squeeze(0)
-        if corr.dim() == 3 and corr.size(0) == 1:
-            corr = corr.squeeze(0)
-        if labels.dim() == 3 and labels.size(0) == 1:
-            labels = labels.squeeze(0)
-
-        graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-        graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
-
-        # Descriptor generation using PointNet or directly using feat_0/feat_1
-        if use_pointnet:
-            feature_encoder = PointNet().to(device)
-            feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        # else:
-        #     feat_0 = feat_0  # Use pre-computed features directly
-        #     feat_1 = feat_1  # Use pre-computed features directly
-
-        if feat_0.dim() == 3 and feat_0.size(0) == 1:
-            feat_0 = feat_0.squeeze(0)
-        if feat_1.dim() == 3 and feat_1.size(0) == 1:
-            feat_1 = feat_1.squeeze(0)
-
-        # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-        # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-        # Initialize edges and edge attributes for source and target
-        edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-        edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
-
-        # Zero the gradients
-        optimizer.zero_grad()
-
-        # # Forward pass through the model
-        quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
-        #corr_loss
-
-        # # Compute pose loss
-        pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
-
-        # # Combine pose and correspondence loss
-        loss = pose_losses + beta*corr_loss
-
-        # # Backward pass and optimization step
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        running_loss += loss.item()
-        running_pose_loss += pose_losses.item()
-        running_corr_loss += corr_loss.item()
-
-        # print("$$$$ iteration runing loss $$$$$")
-        # print(running_loss)
-        # Print loss for every log_interval batches
-        if (batch_idx+1) % log_interval == 0:
-            print(f'Iteration {batch_idx}/{len(train_loader)} - Loss: {loss.item():.6f}')
-
-            # Log the average loss for this epoch
-        # writer.add_scalar('Loss/train', avg_loss, epoch)
-
-    # Return the average losses over the entire validation dataset
-    avg_loss = running_loss / len(dataloader)
-    avg_pose_loss = running_pose_loss / len(dataloader)
-    avg_corr_loss = running_corr_loss / len(dataloader)
-
-    print(f'Training Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
-
-    return avg_loss
-
-
-# Function to validate the model on the validation set
-def validate(model, dataloader, device, epoch, writer, use_pointnet=False):
-    model.eval()  # Set model to evaluation mode
-    running_loss = 0.0  # Track overall loss
-    running_corr_loss = 0.0  # Track correspondence rank loss
-    running_pose_loss = 0.0  # Track pose loss
-
-    with torch.no_grad():  # No need to track gradients during validation
-        for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            # Check if any returned data is None, and skip if so
-            if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-                print(f"Skipping batch {batch_idx} due to missing data.")
-                continue  # Skip this batch
-
-            # Move the data to the specified device (GPU/CPU)
-            corr = corr.to(device)
-            labels = labels.to(device)
-            xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
-            feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
-            gt_pose = gt_pose.to(device)
-
-            # xyz_0, xyz_1 = center_and_normalize(xyz_0, xyz_1)
-            # print("################@@@@@@@@@@@@@@@@######################")
-            # print(xyz_0.shape)
-            # print(xyz_1.shape)
-            # print(feat_0.shape)
-            # print(feat_1.shape)
-    
-            # Initialize KNN graphs for source and target point clouds
-            k = 12
-            ####### remove the batch size when it is one ##############
-            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-                xyz_0 = xyz_0.squeeze(0)
-            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-                xyz_1 = xyz_1.squeeze(0)
-            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-                gt_pose = gt_pose.squeeze(0)
-            if corr.dim() == 3 and corr.size(0) == 1:
-                corr = corr.squeeze(0)
-            if labels.dim() == 3 and labels.size(0) == 1:
-                labels = labels.squeeze(0)
-
-            graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-            graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
-
-
-            # Descriptor generation using PointNet or directly using feat_0/feat_1
-            if use_pointnet:
-                feature_encoder = PointNet().to(device)
-                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # else:
-            #     feat_0 = feat_0  # Use pre-computed features directly
-            #     feat_1 = feat_1  # Use pre-computed features directly
-
-            if feat_0.dim() == 3 and feat_0.size(0) == 1:
-                feat_0 = feat_0.squeeze(0)
-            if feat_1.dim() == 3 and feat_1.size(0) == 1:
-                feat_1 = feat_1.squeeze(0)
-
-            # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # Initialize edges and edge attributes for source and target
-            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
-
-            # # Forward pass through the model
-            quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
-            #corr_loss
-
-            # # Compute pose loss
-            pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
-
-            # # Combine pose and correspondence loss
-            loss = pose_losses + beta*corr_loss
-
-            # Accumulate losses
-            running_loss += loss.item()
-            running_pose_loss += pose_losses.item()
-            running_corr_loss += corr_loss.item()
-
-        # Return the average losses over the entire validation dataset
-        avg_loss = running_loss / len(dataloader)
-        avg_pose_loss = running_pose_loss / len(dataloader)
-        avg_corr_loss = running_corr_loss / len(dataloader)
-
-    print(f'Validation Loss: {avg_loss:.6f} | Pose Loss: {avg_pose_loss:.6f} | Correspondence Loss: {avg_corr_loss:.6f}')
-
-    # # Log validation losses
-    # writer.add_scalar('Loss/validation', avg_loss, epoch)
-    # writer.add_scalar('Pose_Loss/validation', avg_pose_loss, epoch)
-    # writer.add_scalar('Correspondence_Loss/validation', avg_corr_loss, epoch)
-
-    return avg_loss, avg_pose_loss, avg_corr_loss
-
 # Save the checkpoint
 def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
     """
@@ -1049,60 +804,6 @@ def load_checkpoint(checkpoint_path, pointnet=None, egnn=None, cross_attention=N
     # Return the epoch to resume training from
     return checkpoint, checkpoint.get('epoch', 0)
 
-# Main training loop
-def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device, writer, use_pointnet=False, log_interval=10, beta=0.1, save_path="./checkpoints"):
-    """
-    Train the model and save checkpoints during training.
-
-    Args:
-        model (torch.nn.Module): CrossAttentionPoseRegression model which contains EGNN.
-        train_loader (torch.utils.data.DataLoader): Dataloader for training data.
-        val_loader (torch.utils.data.DataLoader): Dataloader for validation data.
-        num_epochs (int): Number of epochs to train.
-        learning_rate (float): Learning rate for the optimizer.
-        device (torch.device): Device to train on (e.g., 'cuda' or 'cpu').
-        use_pointnet (bool): Whether to use PointNet encoder.
-        log_interval (int): Interval for logging the training progress.
-        save_path (str): Path to save the model checkpoints.
-    """
-    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    # optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
-    best_val_loss = float('inf')  # Track the best validation loss
-
-    # If using PointNet encoder, initialize it separately
-    if use_pointnet:
-        pointnet = PointNet().to(device)
-    else:
-        pointnet = None  # No PointNet in this case
-
-    # Extract EGNN and CrossAttentionPoseRegression components from the model
-    egnn = model.egnn
-    cross_attention = model  # CrossAttentionPoseRegression is the top-level model
-
-    for epoch in range(num_epochs):
-        # Train for one epoch
-        print(f'\nEpoch {epoch + 1}/{num_epochs}')
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, writer, use_pointnet, log_interval, beta)
-
-        # Validate every few epochs (e.g., every 5 epochs)
-        if (epoch + 1) % 1 == 0:
-            val_loss, val_pose_loss, val_corr_loss = validate(model, val_loader, device, epoch, writer, use_pointnet)
-            print(val_loss)
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}, Validation Avg Loss: {val_loss:.6f}')
-        else:
-            print(f'Epoch {epoch + 1}/{num_epochs} - Training Avg Loss: {train_loss:.6f}')
-
-        # Save the checkpoint if the validation loss is the best so far
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, save_path, is_best=True, use_pointnet=use_pointnet)
-            print(f'Best model checkpoint saved at epoch {epoch + 1} with validation loss: {best_val_loss:.6f}')
-
-        # Save checkpoint every 16 epochs
-        if (epoch + 1) % 20 == 0 or (epoch + 1) == num_epochs:
-            checkpoint_path = save_path  #"./checkpoints"
-            save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
 def evaluate_model(checkpoint_path, save_dir, model, dataloader, device, use_pointnet=False):
     """
@@ -1198,11 +899,26 @@ def evaluate_model(checkpoint_path, save_dir, model, dataloader, device, use_poi
             quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
             #corr_loss
             # Predicted pose as a transformation matrix
-            pred_pose = quaternion_to_matrix(np.hstack((quaternion.cpu().numpy(), translation.cpu().numpy())))
+            pred_pose = quat_to_mat(np.hstack((quaternion.cpu().numpy(), translation.cpu().numpy())))
 
             # Compute evaluation metrics
             rot_err, trans_err = calculate_pose_error(gt_pose.cpu().numpy(), pred_pose)
-            recall = registration_recall(gt_pose.cpu().numpy(), pred_pose, src_pts.cpu().numpy(), tar_pts.cpu().numpy())
+            print("$$$$$$ ######### $$$$$")
+            print(gt_pose.shape)
+            print(pred_pose.shape)
+            print(src_pts.shape)
+            # Ensure points are 2048 x 3 by removing the batch dimension
+            if src_pts.dim() == 3 and src_pts.size(0) == 1:
+                src_pts = src_pts.squeeze(0)
+            if tar_pts.dim() == 3 and tar_pts.size(0) == 1:
+                tar_pts = tar_pts.squeeze(0)
+
+            # Convert to homogeneous coordinates
+            src_pts_homogeneous = np.hstack((src_pts.cpu().numpy(), np.ones((src_pts.shape[0], 1))))
+            tar_pts_homogeneous = np.hstack((tar_pts.cpu().numpy(), np.ones((tar_pts.shape[0], 1))))
+
+            # Call the registration_recall function with properly formatted inputs
+            recall = registration_recall(gt_pose.cpu().numpy(), pred_pose, src_pts_homogeneous, tar_pts_homogeneous)
 
             # Update metrics
             rotation_errors.append(rot_err)
@@ -1278,33 +994,7 @@ if __name__ == "__main__":
     mode = args.mode
     savepath = args.savepath
 
-    mode = "train" ### set to "eval" for inference mode
-
-    train_dataset = ThreeDMatchTrainVal(root=base_dir, 
-                            split=mode,   
-                            descriptor='fcgf',
-                            in_dim=6,
-                            inlier_threshold=0.10,
-                            num_node=2048, 
-                            use_mutual=True,
-                            downsample=0.03, 
-                            augment_axis=1, 
-                            augment_rotation=1.0,
-                            augment_translation=0.01,
-                        )
-
-    val_dataset = ThreeDMatchTrainVal(root=base_dir, 
-                            split='val',   
-                            descriptor='fcgf',
-                            in_dim=6,
-                            inlier_threshold=0.10,
-                            num_node=2048, 
-                            use_mutual=True,
-                            downsample=0.03, 
-                            augment_axis=1, 
-                            augment_rotation=1.0,
-                            augment_translation=0.01,
-                        )
+    mode = "test" ### set to "eval" for inference mode
 
     test_dataset = ThreeDMatchTest(root=base_dir, 
                             split='test',   
@@ -1328,11 +1018,7 @@ if __name__ == "__main__":
         print("Created directory for log init runs/pose_regression_experiment")
     writer = SummaryWriter(log_dir='runs/pose_regression_experiment')
 
-    # # Create DataLoaders
-    if mode == "train":
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    elif mode == "test":
+    if mode == "test":
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     egnn = EGNN(in_node_nf=in_node_nf, hidden_nf=hidden_node_nf, out_node_nf=out_node_nf, in_edge_nf=1, n_layers=n_layers)
@@ -1342,12 +1028,7 @@ if __name__ == "__main__":
     cross_attention_model = CrossAttentionPoseRegression(egnn=egnn, num_nodes=num_node, hidden_nf=sim_hidden_nf, device=dev).to(dev)
     cross_attention_model.to(dev)
 
-    # cross_attention_model(h, x, graph_idx1, edge_attr1, h, x, graph_idx1, edge_attr1)
-    ##########comment these lines during evaluation mode#################
-    if mode == "train":
-        train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
-                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
-    elif mode == "test":
+    if mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_1.pth" #####specify the right path of the saved checkpint#######
         savedir = "./output/"
-        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, savedir, cross_attention_model, test_loader, device=dev, use_pointnet=False)
+        avg_metric_results = evaluate_model(checkpoint_path, savedir, cross_attention_model, test_loader, device=dev, use_pointnet=False)

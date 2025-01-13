@@ -153,6 +153,35 @@ def transform_target_to_source_frame(xyz_source, xyz_target):
     
     return xyz_target_transformed
 
+def remap_correspondences(sampled_corr, sample_size):
+    """
+    Remap sampled correspondences to new consecutive indices while preserving pairs.
+    
+    Args:
+    - sampled_corr: Nx2 array of correspondence pairs
+    - sample_size: Target size after sampling
+    
+    Returns:
+    - remapped_corr: Nx2 array with remapped indices
+    """
+    # Get all unique values from both columns while preserving order of appearance
+    all_indices = []
+    seen = set()
+    
+    # Preserve order of first appearance for each index
+    for idx in sampled_corr.flatten():
+        if idx not in seen:
+            seen.add(idx)
+            all_indices.append(idx)
+    
+    # Create mapping dictionary preserving order of appearance
+    mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(all_indices)}
+    
+    # Remap both columns using the same mapping
+    remapped_corr = np.array([[mapping[val] for val in pair] for pair in sampled_corr])
+    
+    return remapped_corr
+
 
 class ThreeDMatchTrainVal(data.Dataset):
     def __init__(self, 
@@ -179,7 +208,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         self.augment_axis = augment_axis
         self.augment_rotation = augment_rotation
         self.augment_translation = augment_translation
-        self.synthetic_pose_flag = True
+        self.synthetic_pose_flag = False
         self.normalize_use = False
 
         # Load the file list based on the split
@@ -338,23 +367,57 @@ class ThreeDMatchTrainVal(data.Dataset):
         # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
-
-        # Sample 60% from positive labels and 40% from negative labels
-        num_pos = int(self.num_node * 1.0)
-        num_neg = self.num_node - num_pos
-
-        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
-
-        if len(pos_indices) < 35:
-            sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
-        else:
-            pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
+        
+        # Get number of available positive samples
+        num_available_pos = len(pos_indices)
+        print("$$$$$$$$$$$$")
+        print(src_pts.shape)
+        print(tar_pts.shape)
+        print(corr.shape)
+        print(labels.shape)
+        print(src_features.shape)
+        print(tgt_features.shape)
+        
+        num_available_pos = len(pos_indices)
+        pos_sample_thre = int(sample_size * 0.3)  # 30% threshold for positive samples
+        sampled_indices = None
+        # Initialize sampled indices
+        if num_available_pos < pos_sample_thre:
+            # If very few positive samples, use all positives
+            pos_sampled = pos_indices
+            num_neg_needed = sample_size - num_available_pos
+            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
+            # Sort indices
             pos_sampled = np.sort(pos_sampled)
-            neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
             neg_sampled = np.sort(neg_sampled)
+            
             # Combine positive and negative indices
-            sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+        elif num_available_pos > sample_size:
+            # If too many positives, sample to fit sample_size
+            pos_sampled = np.random.choice(pos_indices, sample_size, replace=True)
+            neg_sampled = []
+            # Sort indices
+            pos_sampled = np.sort(pos_sampled)
+                    
+            # Combine positive and negative indices
+            # sampled_indices = np.concatenate([pos_sampled])
+        else:
+            # Sample positive and negative indices proportionally
+            num_pos = num_available_pos
+            num_neg = sample_size - num_pos
+            pos_sampled = pos_indices
+            neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
+            # Sort indices
+            pos_sampled = np.sort(pos_sampled)
+            neg_sampled = np.sort(neg_sampled)
+                    
+             # Combine positive and negative indices
+            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
+
+        sampled_indices = np.random.choice(labels, sample_size, replace=True)
+
+        print(sampled_indices)
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
         sampled_src_features = src_features[sampled_indices]
@@ -366,7 +429,10 @@ class ThreeDMatchTrainVal(data.Dataset):
         sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
 
 
-        # Ensure that all values are mapped independently into the range [0, N-1]
+        # After sampling labels and getting corresponding pairs
+        # remapped_corr = remap_correspondences(sampled_corr, sample_size)
+
+        # # Ensure that all values are mapped independently into the range [0, N-1]
         unique_indices_first = np.unique(sampled_corr[:, 0])  # Unique values in the first column
         unique_indices_second = np.unique(sampled_corr[:, 1])  # Unique values in the second column
 
@@ -385,15 +451,13 @@ class ThreeDMatchTrainVal(data.Dataset):
         # Retrieve the labels for the resampled source points
         sampled_labels = labels[sampled_indices]
         # print("@@@@@@@@@@@@   @@@@@@@@@@@")
-        # print(pos_indices)
-        # print(neg_indices)
-        # print(sampled_labels)
-        # print(len(remapped_corr))
         # print(remapped_corr)
         # # Now remap target indices
         # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
         # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
-        
+        print("@@@@@@@@@@@ @@@@@@333333@@@@@ @@@@@@@@@")
+        print(sampled_src_pts)
+        print(sampled_tgt_pts)        
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005

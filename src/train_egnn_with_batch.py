@@ -560,9 +560,9 @@ class CrossAttentionPoseRegression(nn.Module):
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
         batch_size = h_src.size(0)
-        print("######### source and target point features #########")
-        print(h_src)
-        print(h_tgt)
+        # print("######### source and target point features #########")
+        # print(h_src)
+        # print(h_tgt)
         # Normalize features
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
         h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
@@ -760,9 +760,6 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     cosine_similarity = dot_product / (norm_pred * norm_gt)             # Shape: [B]
 
     translation_loss = torch.arccos(torch.clamp(cosine_similarity, min=-1, max=1))  # Shape: [B]
-    print("####### !!! #######")
-    print(rotation_loss.shape)
-    print(translation_loss.shape)
 
     return rotation_loss, translation_loss
 

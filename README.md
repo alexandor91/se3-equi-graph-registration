@@ -60,6 +60,8 @@ One more thing to the training of custom dataset training, you can set "use_poin
 tensorboard logs are exported under "./runs" directory relative to the run script.
 
 ## Evaluation
+Change the "checkpoint_path" variable in "eval_egnn_metrics.py" to the real relative directory of your saved model checkpoint,
+
 Put your best trained checkpoint under "./src/checkpoints/"  directory,
 
 For online test mode, In same "src folder"  in "eval_egnn_metrics.py", set the "mode" variable in the main function to "test" mode (default is "test"), then run it to load the test split data for evaluation.

@@ -1255,4 +1255,4 @@ if __name__ == "__main__":
                 learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=True, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
-        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)
+        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=True)

@@ -330,10 +330,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         labels = data.get('labels')  # Binary labels (N,)
         gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
 
-        # print("@@@@@@@@@@@@ #### @@@@@@@@@@@")
-        # print(len(corr[:, 0]))
-        # print(len(np.where(labels == 1)[0]))
-        # print(len(np.where(labels == 0)[0]))
 
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
@@ -415,9 +411,8 @@ class ThreeDMatchTrainVal(data.Dataset):
              # Combine positive and negative indices
             # sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
 
-        sampled_indices = np.random.choice(labels, sample_size, replace=True)
+        sampled_indices = np.random.choice(src_pts.shape[0], sample_size, replace=True)
 
-        print(sampled_indices)
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
         sampled_src_features = src_features[sampled_indices]
@@ -455,9 +450,12 @@ class ThreeDMatchTrainVal(data.Dataset):
         # # Now remap target indices
         # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
         # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
-        print("@@@@@@@@@@@ @@@@@@333333@@@@@ @@@@@@@@@")
-        print(sampled_src_pts)
-        print(sampled_tgt_pts)        
+        # print("@@@@@@@@@@@ @@@@@@333333@@@@@ @@@@@@@@@")
+        # print(sampled_indices)
+        # vector_norms = np.linalg.norm(sampled_src_pts, axis=1)
+        # print("Norms of each vector:", vector_norms)
+        # print(sampled_src_pts) 
+        # print(sampled_tgt_pts)       
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005

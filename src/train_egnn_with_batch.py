@@ -579,7 +579,7 @@ class CrossAttentionPoseRegression(nn.Module):
         # Compute similarity matrix
         large_sim_matrix = torch.matmul(h_src_norm, h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
         large_sim_matrix = F.softmax(large_sim_matrix, dim=-1)
-        u1, s1, v1 = torch.svd(large_sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
+        # u1, s1, v1 = torch.svd(large_sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
 
         corr_indices = corr.long()  # Shape: [B, M, 2]
         labels = labels.long()  # Shape: [B, M]
@@ -914,7 +914,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
-            loss = rot_loss.mean() + trans_loss.mean() #+ beta * corr_loss.mean()
+            loss = rot_loss.mean() + trans_loss.mean() + beta * corr_loss.mean()
 
             # Accumulate losses
             running_loss += loss.item()
@@ -1146,7 +1146,7 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=24, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=36, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')

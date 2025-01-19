@@ -426,32 +426,47 @@ def rotation_matrix_to_quaternion(rotation_matrix):
     
     return quaternions
 
-def quaternion_to_matrix(quaternion):
+def quaternion_to_matrix(quaternions):
     """
-    Converts a batch of quaternions into 3x3 rotation matrices.
+    Convert a batch of quaternions to a batch of rotation matrices.
     
     Args:
-        quaternion (torch.Tensor): A tensor of shape (B, 4) representing (w, x, y, z) for a batch of size B.
+        quaternions (torch.Tensor): Tensor of shape (B, 4), where each quaternion is [qx, qy, qz, qw].
         
     Returns:
-        torch.Tensor: A tensor of shape (B, 3, 3) containing the rotation matrices.
+        torch.Tensor: Tensor of shape (B, 3, 3), batch of rotation matrices.
     """
-    # Split the quaternion components
-    w, x, y, z = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
+    # Ensure the input has the correct shape
+    assert quaternions.shape[-1] == 4, "Input quaternions should have shape (B, 4)"
     
-    # Compute the individual terms for the rotation matrix
-    ww, xx, yy, zz = w * w, x * x, y * y, z * z
-    wx, wy, wz = w * x, w * y, w * z
-    xy, xz, yz = x * y, x * z, y * z
+    # Normalize the quaternions to ensure unit length
+    quaternions = F.normalize(quaternions, p=2, dim=-1)
     
-    # Build the rotation matrices for each batch
-    rot_matrix = torch.stack([
-        torch.stack([ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)], dim=-1),
-        torch.stack([2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)], dim=-1),
-        torch.stack([2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz], dim=-1)
-    ], dim=-2)  # Shape: (B, 3, 3)
+    # Extract components of the quaternion
+    qx, qy, qz, qw = quaternions.unbind(dim=-1)
     
-    return rot_matrix.to(quaternion.device)
+    # Compute the rotation matrix components
+    r00 = 1 - 2 * (qy ** 2 + qz ** 2)
+    r01 = 2 * (qx * qy - qz * qw)
+    r02 = 2 * (qx * qz + qy * qw)
+    r10 = 2 * (qx * qy + qz * qw)
+    r11 = 1 - 2 * (qx ** 2 + qz ** 2)
+    r12 = 2 * (qy * qz - qx * qw)
+    r20 = 2 * (qx * qz - qy * qw)
+    r21 = 2 * (qy * qz + qx * qw)
+    r22 = 1 - 2 * (qx ** 2 + qy ** 2)
+    
+    # Stack components into the rotation matrix
+    rotation_matrix = torch.stack(
+        [
+            torch.stack([r00, r01, r02], dim=-1),
+            torch.stack([r10, r11, r12], dim=-1),
+            torch.stack([r20, r21, r22], dim=-1),
+        ],
+        dim=-2,
+    )  # Shape: (B, 3, 3)
+    
+    return rotation_matrix
 
 
 def matrix_log(R):
@@ -615,10 +630,11 @@ def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt
     batch_size = quaternion.shape[0]
 
     # Convert quaternion to rotation matrices
-    rotation_matrices = torch.stack([
-        quaternion_to_matrix(quaternion[b]).to(device)
-        for b in range(batch_size)
-    ], dim=0)  # Shape: [batch_size, 3, 3]
+    rotation_matrices = quaternion_to_matrix(quaternion)
+    # torch.stack([
+    #     quaternion_to_matrix(quaternion[b]).to(device)
+    #     for b in range(batch_size)
+    # ], dim=0)  # Shape: [batch_size, 3, 3]
 
     # Transform source points
     x_src_transformed = torch.matmul(rotation_matrices, x_src.transpose(1, 2)).transpose(1, 2) + translation.unsqueeze(1)
@@ -627,9 +643,18 @@ def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt
     point_distances = torch.norm(x_src_transformed - x_tgt, dim=-1)  # Shape: [batch_size, N]
 
     # Apply mask for valid correspondences
-    valid_distances = point_distances[gt_labels == 1]
-    point_error = torch.mean(valid_distances) if valid_distances.numel() > 0 else torch.tensor(0.0, device=device)
+    valid_distances = point_distances * gt_labels  # Elementwise multiplication
 
+    # Calculate the sum of valid distances and the count of valid points for each batch
+    sum_valid_distances = torch.sum(valid_distances, dim=1)  # Sum over points for each batch
+    num_valid_points = torch.sum(gt_labels, dim=1)           # Count valid points for each batch
+
+    # Avoid division by zero by ensuring num_valid_points is non-zero
+    num_valid_points = torch.clamp(num_valid_points, min=1)  # Replace 0 with 1 to avoid division by zero
+
+    # Calculate mean distance for each batch
+    batch_mean_distances = sum_valid_distances / num_valid_points  # [batch_size]
+    point_error = torch.mean(batch_mean_distances)  # Scalar
     # Apply LayerNorm for feature stability
     # layer_norm = nn.LayerNorm(h_src_norm.shape[-1]).to(device)  # Assumes last dim is feature size
     # h_src_norm = layer_norm(h_src_norm)
@@ -763,15 +788,37 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 
         # Forward pass through the model
         quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
+
+        point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
+        
         # Compute pose loss
-        rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
+        rot_losses, trans_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
         # Compute the mean loss for the batch
-        rot_loss_mean = rot_loss.mean()  # Normalize rotation loss across the batch
-        trans_loss_mean = trans_loss.mean()  # Normalize translation loss across the batch
+        # mean_loss = rot_losses.mean()
+        # std_loss = rot_losses.std(unbiased=False) + 1e-6  # Add small value to avoid division by zero
+        # normalized_batch_losses = (rot_losses - mean_loss) / std_loss
+
+        # # Optionally scale normalized losses
+        # scaled_losses = normalized_batch_losses * 1.0  # Scaling factor if desired
+
+        # # Compute final loss for backpropagation (mean of normalized losses)
+        # rot_loss_mean = torch.mean(scaled_losses)
+
+        # mean_trans_loss = trans_losses.mean()
+        # std_trans_loss = trans_losses.std(unbiased=False) + 1e-6  # Add small value to avoid division by zero
+        # normalized_batch_trans_losses = (trans_losses - mean_trans_loss) / std_trans_loss
+
+        # # Optionally scale normalized losses
+        # scaled_trans_losses = normalized_batch_trans_losses * 1.0  # Scaling factor if desired
+
+        # # Compute final loss for backpropagation (mean of normalized losses)
+        # trans_loss_mean = torch.mean(scaled_trans_losses)
+        rot_loss_mean = rot_losses.mean()  # Normalize rotation loss across the batch
+        trans_loss_mean = trans_losses.mean()  # Normalize translation loss across the batch
 
         # Combine the normalized losses if needed
-        total_loss = rot_loss_mean + trans_loss_mean    
+        total_loss = rot_loss_mean + trans_loss_mean + beta * point_error 
         print("#####################")
         print(rot_loss_mean)
         print(trans_loss_mean)
@@ -833,6 +880,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             # # Extract edges and edge attributes
             # edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), xyz_0.size(1))
             # edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), xyz_1.size(1))
+
             edges_0 = None
             edge_attr_0 = None
             edges_1 = None
@@ -840,12 +888,12 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             point_error = None
             feature_loss = None
             # Forward pass through the model
-            quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(
+            quaternion, translation, corr_loss, h_src, x_src, h_tgt, x_tgt, gt_labels = model(
                 feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels
             )
             corr_loss = 1.0
             # Compute additional losses
-            # point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
+            point_error, feature_loss = compute_losses(quaternion, translation, h_src, x_src, h_tgt, x_tgt, gt_labels)
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
@@ -857,7 +905,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             running_trans_loss += trans_loss.mean().item()
 
             # running_corr_loss += corr_loss.mean().item()
-            # running_point_error += point_error.mean().item()
+            running_point_error += point_error.mean().item()
             # running_feature_consensus_error += feature_loss.mean().item()
 
         # Compute average losses
@@ -867,7 +915,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
         avg_trans_loss = running_trans_loss / num_batches
 
         # avg_corr_loss = running_corr_loss / num_batches
-        # avg_point_error = running_point_error / num_batches
+        avg_point_error = running_point_error / num_batches
         # avg_feature_consensus_error = running_feature_consensus_error / num_batches
 
         print(

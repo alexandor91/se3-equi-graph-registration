@@ -221,45 +221,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         else:
             raise ValueError(f"Invalid split: {self.split}. Must be 'train' or 'val'.")
 
-    # def __getitem__(self, index):
-    #     file_name = self.file_list[index]
-
-    #     # Load data from .pkl file
-    #     with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
-    #         data = pickle.load(f)
-
-    #     # Extract data
-    #     src_pts = data.get('xyz_0')  # Nx3
-    #     tar_pts = data.get('xyz_1')  # Mx3
-    #     src_features = data.get('feat_0')  # Nx32
-    #     tgt_features = data.get('feat_1')  # Mx32
-    #     corr = data.get('corr')  # Correspondence (Nx2), maps source index -> target index
-    #     labels = data.get('labels')  # Binary labels (Nx1)
-    #     gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
-
-    #     # Normalize features if using FPFH descriptor
-    #     if self.descriptor == 'fpfh':
-    #         src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
-    #         tgt_features = tgt_features / (np.linalg.norm(tgt_features, axis=1, keepdims=True) + 1e-6)
-
-    #     N_src = len(src_pts)
-    #     N_tgt = len(tar_pts)
-
-    #     # Sort points by ray length to the sensor origin
-    #     sensor_origin = np.array([0, 0, 0])
-    #     ray_lengths_src = np.linalg.norm(src_pts - sensor_origin, axis=1)
-    #     sorted_indices_src = np.argsort(ray_lengths_src)
-        
-    #     ray_lengths_tgt = np.linalg.norm(tar_pts - sensor_origin, axis=1)
-    #     sorted_indices_tgt = np.argsort(ray_lengths_tgt)
-
-    #     # Reorder points and features based on ray lengths
-    #     src_pts = src_pts[sorted_indices_src]
-    #     src_features = src_features[sorted_indices_src]
-
-    #     tar_pts = tar_pts[sorted_indices_tgt]
-    #     tgt_features = tgt_features[sorted_indices_tgt]
-
     #     # Reorder `corr` based on the new source and target orders.
     #     # Remap source indices:
     #     corr[:, 0] = np.searchsorted(sorted_indices_src, corr[:, 0])  
@@ -366,16 +327,11 @@ class ThreeDMatchTrainVal(data.Dataset):
         
         # Get number of available positive samples
         num_available_pos = len(pos_indices)
-        print("$$$$$$$$$$$$")
-        print(src_pts.shape)
-        print(tar_pts.shape)
-        print(corr.shape)
-        print(labels.shape)
-        print(src_features.shape)
-        print(tgt_features.shape)
+        # print("$$$$$$$$$$$$")
+        # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])
         
         num_available_pos = len(pos_indices)
-        pos_sample_thre = int(sample_size * 0.3)  # 30% threshold for positive samples
+        pos_sample_thre = int(sample_size * 0.7)  # 30% threshold for positive samples
         sampled_indices = None
         # Initialize sampled indices
         if num_available_pos < pos_sample_thre:
@@ -383,35 +339,24 @@ class ThreeDMatchTrainVal(data.Dataset):
             pos_sampled = pos_indices
             num_neg_needed = sample_size - num_available_pos
             neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
+            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
             # Sort indices
-            pos_sampled = np.sort(pos_sampled)
-            neg_sampled = np.sort(neg_sampled)
-            
+
             # Combine positive and negative indices
             # sampled_indices = np.concatenate([pos_sampled, neg_sampled])
-        elif num_available_pos > sample_size:
+        elif num_available_pos >= pos_sample_thre:
             # If too many positives, sample to fit sample_size
-            pos_sampled = np.random.choice(pos_indices, sample_size, replace=True)
-            neg_sampled = []
+            pos_sampled = np.random.choice(pos_indices, pos_sample_thre, replace=False)
+            num_neg_needed = sample_size - pos_sample_thre
+            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
             # Sort indices
-            pos_sampled = np.sort(pos_sampled)
-                    
-            # Combine positive and negative indices
-            # sampled_indices = np.concatenate([pos_sampled])
-        else:
-            # Sample positive and negative indices proportionally
-            num_pos = num_available_pos
-            num_neg = sample_size - num_pos
-            pos_sampled = pos_indices
-            neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
-            # Sort indices
-            pos_sampled = np.sort(pos_sampled)
-            neg_sampled = np.sort(neg_sampled)
-                    
+            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
+        sampled_indices = np.sort(sampled_indices)                    
+
              # Combine positive and negative indices
             # sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
 
-        sampled_indices = np.random.choice(src_pts.shape[0], sample_size, replace=True)
+        # sampled_indices = np.random.choice(src_pts.shape[0], sample_size, replace=True)
 
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
@@ -422,7 +367,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         sampled_tgt_indices = sampled_corr[:, 1].astype(int)  # Get target indices
         sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
         sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
-
 
         # After sampling labels and getting corresponding pairs
         # remapped_corr = remap_correspondences(sampled_corr, sample_size)
@@ -447,15 +391,12 @@ class ThreeDMatchTrainVal(data.Dataset):
         sampled_labels = labels[sampled_indices]
         # print("@@@@@@@@@@@@   @@@@@@@@@@@")
         # print(remapped_corr)
-        # # Now remap target indices
         # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
         # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
-        # print("@@@@@@@@@@@ @@@@@@333333@@@@@ @@@@@@@@@")
-        # print(sampled_indices)
-        # vector_norms = np.linalg.norm(sampled_src_pts, axis=1)
-        # print("Norms of each vector:", vector_norms)
-        # print(sampled_src_pts) 
-        # print(sampled_tgt_pts)       
+        # print("@@@@@@@@@@ sim scores @@@@@@@@@@@@@")
+        # similarity_matrix = np.dot(sampled_src_features, sampled_tgt_features.T)  # Shape: N x 2048
+        # print(similarity_matrix)
+
         # Data augmentation
         if self.synthetic_pose_flag:
             sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
@@ -578,23 +519,28 @@ class ThreeDMatchTest(data.Dataset):
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
 
-        # Sample 60% from positive labels and 40% from negative labels
-        num_pos = int(self.num_node * 1.0)
-        num_neg = self.num_node - num_pos
+        num_available_pos = len(pos_indices)
+        pos_sample_thre = int(sample_size * 0.7)  # 30% threshold for positive samples
+        sampled_indices = None
+        # Initialize sampled indices
+        if num_available_pos < pos_sample_thre:
+            # If very few positive samples, use all positives
+            pos_sampled = pos_indices
+            num_neg_needed = sample_size - num_available_pos
+            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
+            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
+            # Sort indices
 
-        # if len(pos_indices) < num_pos or len(neg_indices) < num_neg:
-        #     print("Not enough positive or negative points to satisfy the 0.60-0.40 ratio. so repeating samplinf will be used!")
-
-
-        if len(pos_indices) < 35:
-            sampled_indices = np.random.choice(len(labels), self.num_node, replace=True)
-        else:
-            pos_sampled = np.random.choice(pos_indices, num_pos, replace=True)
-            pos_sampled = np.sort(pos_sampled)
-            neg_sampled = np.random.choice(neg_indices, num_neg, replace=True)
-            neg_sampled = np.sort(neg_sampled)
             # Combine positive and negative indices
-            sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])
+        elif num_available_pos >= pos_sample_thre:
+            # If too many positives, sample to fit sample_size
+            pos_sampled = np.random.choice(pos_indices, pos_sample_thre, replace=False)
+            num_neg_needed = sample_size - pos_sample_thre
+            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
+            # Sort indices
+            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
+        sampled_indices = np.sort(sampled_indices)                    
 
 
         # Sample source points and features

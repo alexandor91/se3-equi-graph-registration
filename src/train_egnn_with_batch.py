@@ -516,7 +516,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # MLP layers for pose regression
         self.mlp_pose = nn.Sequential(
-            nn.Linear(128 * 2 * self.hidden_nf, 256),
+            nn.Linear(128 * 2 * 3, 256), # self.hidden_nf
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -553,110 +553,45 @@ class CrossAttentionPoseRegression(nn.Module):
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
 
-        self.mlp_compress.apply(init_layer)
+        # self.mlp_compress.apply(init_layer)
         self.mlp_pose.apply(init_layer)
         # self.shared_mlp_decoder.apply(init_layer)
         # self.shallow_mlp_pose.apply(init_layer)
 
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels):
-        batch_size = h_src.size(0)
-        # print("######### source and target point features #########")
-        # print(h_src)
-        # print(h_tgt)
-        # Normalize features
-        h_src_norm = F.normalize(h_src, p=2, dim=-1)
-        h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
+        batch_size, num_points, feature_dim = h_src.shape
+        device = h_src.device
 
-        # h_src = h_src_norm
-        # h_tgt = h_tgt_norm
-        # # # Concatenate features with coordinates
-        h_src = torch.cat([h_src_norm, x_src], dim=-1)  # Shape: [B, N, 35]
-        h_tgt = torch.cat([h_tgt_norm, x_tgt], dim=-1)  # Shape: [B, N, 35]
+        # Row-wise dot product between h_src and h_tgt (resulting in B x N x 1)
+        similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
 
-        # # Normalize features for Hadamard product (L2 normalization)
-        # h_src = F.normalize(h_src, p=2, dim=-1)
-        # h_tgt = F.normalize(h_tgt, p=2, dim=-1)
-        # Compute similarity matrix
-        large_sim_matrix = torch.matmul(h_src_norm, h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
-        large_sim_matrix = F.softmax(large_sim_matrix, dim=-1)
-        # u1, s1, v1 = torch.svd(large_sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
+        # Get top-k scores and indices (k=128)
+        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
 
-        corr_indices = corr.long()  # Shape: [B, M, 2]
-        labels = labels.long()  # Shape: [B, M]
+        # Gather top-k features and corresponding point coordinates
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 128)
+        compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
+        compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
 
-        # Correspondence loss computation
-        corr_similarity = torch.zeros_like(large_sim_matrix)
-        gt_matrix = torch.zeros_like(large_sim_matrix)
+        compressed_x_src = torch.gather(x_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
+        compressed_x_tgt = torch.gather(x_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
 
-        for b in range(batch_size):
-            valid_indices = corr_indices[b, labels[b] == 1]
-            gt_matrix[b, valid_indices[:, 0], valid_indices[:, 1]] = 1.0
-            corr_similarity[b, valid_indices[:, 0], valid_indices[:, 1]] = \
-                large_sim_matrix[b, valid_indices[:, 0], valid_indices[:, 1]]
+        # Concatenate selected source and target coordinates
+        combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, 128, 6]
+        flattened_features = combined_coordinates.view(batch_size, -1)  # [B, 128 * 64]
 
-        corr_loss = F.mse_loss(corr_similarity, gt_matrix)
-
-        # Compress features
-        compressed_h_src = self.mlp_compress(h_src.permute(0, 2, 1)).permute(0, 2, 1)
-        compressed_h_tgt = self.mlp_compress(h_tgt.permute(0, 2, 1)).permute(0, 2, 1)
-
-        # Normalize compressed features
-        compressed_h_src_norm = F.normalize(compressed_h_src, p=2, dim=-1)
-        compressed_h_tgt_norm = F.normalize(compressed_h_tgt, p=2, dim=-1)
-
-        # Compute similarity matrix for compressed features
-        sim_matrix = torch.matmul(compressed_h_src_norm, compressed_h_tgt_norm.transpose(-1, -2))  # Shape: [B, N, N]
-        sim_matrix = F.softmax(sim_matrix, dim=-1)
-
-        # Add numerical stability by scaling and normalizing
-        # sim_matrix = sim_matrix / (sim_matrix.norm(dim=(-2, -1), keepdim=True) + 1e-6)
-        # print("@@@@@@@ !!! @@@@@")
-        # print(sim_matrix[6, : , :])
-        # Placeholder for batch loss
-        batch_loss = None
-
-        # Singular Value Decomposition (SVD)
-        try:
-            # Switch to `torch.linalg.svd` for better numerical stability
-            u, s, v = torch.svd(sim_matrix)  # u: [B, N, N], s: [B, N], v: [B, N, N]
-            sim_matrix += torch.eye(sim_matrix.size(-1), device=sim_matrix.device) * 1e-6
-
-            # Top-k singular values sum
-            top_k_sum = s[:, :35].sum(dim=-1)  # Sum of top-12 singular values
-            target = torch.full_like(top_k_sum, 35.0).to(self.device)  # Target tensor, shape [B]
-
-            # Compute batch loss
-            batch_loss = F.mse_loss(top_k_sum, target)
-
-        except RuntimeError as e:
-            print(f"SVD failed for some batches: {e}")
-            # Gracefully handle failed SVD by skipping or setting a default value
-            batch_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
-
-        # Total correspondence loss
-        total_corr_loss = batch_loss
-
-        # Weighted features
-        weighted_h_src = torch.matmul(sim_matrix.transpose(-1, -2), compressed_h_src)  # Shape: [B, N, D]
-        weighted_h_tgt = torch.matmul(sim_matrix, compressed_h_tgt)  # Shape: [B, N, D]
-
-        # Flatten combined features
-        combined_features = torch.cat([compressed_h_src_norm, compressed_h_tgt_norm], dim=-1)
-        combined_features_flat = combined_features.view(compressed_h_src.size(0), -1)
-        # print("@@@@@@@@@@@@@@@@")
-        # print(s)
-        # print(combined_features_flat.shape)
-        # print(self.hidden_nf)
-        # Regress pose (quaternion + translation)
-        # print("!!!!!!!!!!!!!!!")
-        # print(combined_features.shape)
-        # print(top_k_sum.shape)
-        # print(combined_features_flat.shape)
-        pose = self.mlp_pose(combined_features_flat)  # Shape: [B, 7]
-        quaternion = F.normalize(pose[:, :4], p=2, dim=-1)  # Normalize quaternion
+        # Predict pose using MLP decoder
+        pose = self.mlp_pose(flattened_features)  # [B, 128, 7] (4 for quaternion, 3 for translation)
+        quaternion = F.normalize(pose[:, :4], p=2, dim=-1)
         translation = pose[:, 4:]
+        
+        # Optionally, compute loss
+        # svd_loss = self.compute_svd_loss(compressed_h_src, compressed_h_tgt)
 
-        return quaternion, translation, total_corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, labels
+        # Combine all losses (if needed)
+        total_loss = None
+
+        return quaternion, translation, total_loss, h_src, x_src, h_tgt, x_tgt, labels
 
     
 def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels):
@@ -801,7 +736,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         xyz_1_flat = xyz_1.view(-1, 3)  # Shape: [batch_size * 2048, 3]
 
         # Construct k-NN graphs while keeping points from different batches independent
-        k = 12
+        k = 32
         graph_idx_0 = knn_graph(xyz_0_flat, k=k, batch=batch_indices, loop=False)
         graph_idx_1 = knn_graph(xyz_1_flat, k=k, batch=batch_indices, loop=False)
 
@@ -840,7 +775,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         print("#####################")
         print(rot_loss_mean)
         print(trans_loss_mean)
-        print(beta)    
+
         # Combine pose and correspondence losses
         loss = total_loss #+ beta * corr_loss
 
@@ -908,19 +843,20 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             quaternion, translation, corr_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(
                 feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels
             )
-
+            corr_loss = 1.0
             # Compute additional losses
             # point_error, feature_loss = compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
             rot_loss, trans_loss = pose_loss(quaternion, translation, gt_pose, delta=1.5)
 
             # Combine pose and correspondence loss
-            loss = rot_loss.mean() + trans_loss.mean() + beta * corr_loss.mean()
+            loss = rot_loss.mean() + trans_loss.mean() # + beta * corr_loss.mean()
 
             # Accumulate losses
             running_loss += loss.item()
             running_rot_loss += rot_loss.mean().item()
             running_trans_loss += trans_loss.mean().item()
-            running_corr_loss += corr_loss.mean().item()
+
+            # running_corr_loss += corr_loss.mean().item()
             # running_point_error += point_error.mean().item()
             # running_feature_consensus_error += feature_loss.mean().item()
 
@@ -929,7 +865,8 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
         avg_loss = running_loss / num_batches
         avg_rot_loss = running_rot_loss / num_batches
         avg_trans_loss = running_trans_loss / num_batches
-        avg_corr_loss = running_corr_loss / num_batches
+
+        # avg_corr_loss = running_corr_loss / num_batches
         # avg_point_error = running_point_error / num_batches
         # avg_feature_consensus_error = running_feature_consensus_error / num_batches
 
@@ -937,7 +874,7 @@ def validate(model, dataloader, device, epoch, writer, use_pointnet=False, beta=
             f"Validation Loss: {avg_loss:.6f} | Pose rot Loss: {avg_rot_loss:.6f} | Pose trans Loss: {avg_trans_loss:.6f} "
             # f"Point error: {avg_point_error:.6f} | Feature error: {avg_feature_consensus_error:.6f}"
         )
-
+        avg_corr_loss = None
     return avg_loss, avg_rot_loss + avg_trans_loss, avg_corr_loss, point_error, feature_loss  #, avg_point_error, avg_feature_consensus_error
 
 # Save the checkpoint
@@ -1146,14 +1083,14 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=36, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
     parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
@@ -1252,7 +1189,7 @@ if __name__ == "__main__":
     ##########comment these lines during evaluation mode#################
     if mode == "train":
         train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
-                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=True, log_interval=10, beta=0.1, save_path=savepath)
+                learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
-        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=True)
+        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)

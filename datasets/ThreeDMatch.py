@@ -331,13 +331,16 @@ class ThreeDMatchTrainVal(data.Dataset):
         # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])
         
         num_available_pos = len(pos_indices)
-        pos_sample_thre = int(sample_size * 0.7)  # 30% threshold for positive samples
+        pos_sample_thre = int(sample_size * 1.0)  # 30% threshold for positive samples
         sampled_indices = None
         # Initialize sampled indices
         if num_available_pos < pos_sample_thre:
             # If very few positive samples, use all positives
             pos_sampled = pos_indices
-            num_neg_needed = sample_size - num_available_pos
+            if num_available_pos < sample_size:
+                num_neg_needed = sample_size - num_available_pos
+            else:
+                num_neg_needed = 0
             neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
             # Sort indices

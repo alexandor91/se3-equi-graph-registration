@@ -1,4 +1,3 @@
-
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
@@ -531,7 +530,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # MLP layers for pose regression
         self.mlp_pose = nn.Sequential(
-            nn.Linear(128 * 2 * 3, 256), # self.hidden_nf
+            nn.Linear(512 * 2 * 3, 256), # self.hidden_nf
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -581,10 +580,10 @@ class CrossAttentionPoseRegression(nn.Module):
         similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
 
         # Get top-k scores and indices (k=128)
-        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
+        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=512, dim=-1)  # [B, 128]
 
         # Gather top-k features and corresponding point coordinates
-        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 128)
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 512)
         compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
         compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
 
@@ -818,7 +817,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         trans_loss_mean = trans_losses.mean()  # Normalize translation loss across the batch
 
         # Combine the normalized losses if needed
-        total_loss = rot_loss_mean + trans_loss_mean + beta * point_error 
+        total_loss = rot_loss_mean + trans_loss_mean + point_error 
         print("#####################")
         print(rot_loss_mean)
         print(trans_loss_mean)
@@ -1130,8 +1129,8 @@ def get_args():
     parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
     
     # Add arguments with default values
-    parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--base_dir', type=str, default='/home/eavise3d/Downloads/3DMatch_FPFH_Feature', help='Path to the dataset')
+    parser.add_argument('--batch_size', type=int, default=12, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
@@ -1170,10 +1169,9 @@ if __name__ == "__main__":
     savepath = args.savepath
 
     mode = "train" ### set to "eval" for inference mode
-
     train_dataset = ThreeDMatchTrainVal(root=base_dir, 
                             split=mode,   
-                            descriptor='fcgf',
+                            descriptor='fpfh',
                             in_dim=6,
                             inlier_threshold=0.10,
                             num_node=2048, 
@@ -1186,7 +1184,7 @@ if __name__ == "__main__":
 
     val_dataset = ThreeDMatchTrainVal(root=base_dir, 
                             split='val',   
-                            descriptor='fcgf',
+                            descriptor='fpfh',
                             in_dim=6,
                             inlier_threshold=0.10,
                             num_node=2048, 
@@ -1199,7 +1197,7 @@ if __name__ == "__main__":
 
     test_dataset = ThreeDMatchTest(root=base_dir, 
                             split='test',   
-                            descriptor='fcgf',
+                            descriptor='fpfh',
                             in_dim=6,
                             inlier_threshold=0.10,
                             num_node=2048, 
@@ -1210,7 +1208,6 @@ if __name__ == "__main__":
                             augment_translation=0.01,
                         )
     # Instantiate the dataset
-
 
     # Initialize TensorBoard writer
     # Ensure the directory exists

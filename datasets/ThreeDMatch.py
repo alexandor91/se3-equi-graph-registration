@@ -291,7 +291,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         labels = data.get('labels')  # Binary labels (N,)
         gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
 
-
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
             src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
@@ -302,8 +301,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         # Count the number of ones
         # num_ones = np.count_nonzero(labels == 1)
 
-        # print(f"Number of ones: {num_ones}")
-        
+                
         # Sort the points by ray length to sensor origin for ordering
         sensor_origin = np.array([0, 0, 0])
         ray_lengths_src = np.linalg.norm(src_pts - sensor_origin, axis=1)
@@ -475,7 +473,6 @@ class ThreeDMatchTest(data.Dataset):
 
     def __getitem__(self, index):
         file_name = self.file_list[index]
-
         # Load data from .pkl file
         with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
             data = pickle.load(f)
@@ -529,7 +526,10 @@ class ThreeDMatchTest(data.Dataset):
         if num_available_pos < pos_sample_thre:
             # If very few positive samples, use all positives
             pos_sampled = pos_indices
-            num_neg_needed = sample_size - num_available_pos
+            if num_available_pos < sample_size:
+                num_neg_needed = sample_size - num_available_pos
+            else:
+                num_neg_needed = 0
             neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
             # Sort indices
@@ -543,8 +543,7 @@ class ThreeDMatchTest(data.Dataset):
             neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
             # Sort indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
-        sampled_indices = np.sort(sampled_indices)                    
-
+        sampled_indices = np.sort(sampled_indices)                      
 
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
@@ -627,13 +626,14 @@ class ThreeDMatchTest(data.Dataset):
         return traj
 
 if __name__ == "__main__":
-    base_dir = '/home/eavise3d/3DMatch_FCGF_Feature_32_transform'
+    base_dir = '/home/eavise3d/3DMatch_FCGF_Feature_32_transform'  ####fcgf features
+    # base_dir = '/home/eavise3d/Downloads/3DMatch_FPFH_Feature'
     # pkl_file = '5.pkl'
     mode = "train"
     if mode == "train":
         dset = ThreeDMatchTrainVal(root=base_dir, 
                             split='train',   
-                            descriptor='fcgf',
+                            descriptor='fpfh',
                             in_dim=6,
                             inlier_threshold=0.10,
                             num_node=2048, 
@@ -649,7 +649,7 @@ if __name__ == "__main__":
             ret_dict = dset[i]
     if mode == "test":
         dset = ThreeDMatchTest(root=base_dir, 
-                            descriptor='fcgf',
+                            descriptor='fpfh',
                             in_dim=6,
                             inlier_threshold=0.10,
                             num_node=2048, 

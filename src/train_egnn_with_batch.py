@@ -425,6 +425,58 @@ def rotation_matrix_to_quaternion(rotation_matrix):
     
     return quaternions
 
+def rotation_matrix_to_quaternion_batch(R):
+    """
+    Convert a batch of rotation matrices to quaternions.
+
+    Inputs:
+        R: (B, 3, 3) - Batch of rotation matrices.
+
+    Outputs:
+        quaternions: (B, 4) - Batch of quaternions (w, x, y, z), where w is the scalar part.
+    """
+    B = R.shape[0]
+    
+    # Allocate output tensor for quaternions
+    quaternions = torch.zeros((B, 4), device=R.device, dtype=R.dtype)
+
+    # Extract trace of each rotation matrix
+    trace = torch.einsum('bii->b', R)  # Sum of diagonal elements (B,)
+
+    for b in range(B):
+        if trace[b] > 0.0:
+            # Case: Trace is positive
+            S = torch.sqrt(trace[b] + 1.0) * 2.0  # S = 4 * qw
+            qw = 0.25 * S
+            qx = (R[b, 2, 1] - R[b, 1, 2]) / S
+            qy = (R[b, 0, 2] - R[b, 2, 0]) / S
+            qz = (R[b, 1, 0] - R[b, 0, 1]) / S
+        elif (R[b, 0, 0] > R[b, 1, 1]) and (R[b, 0, 0] > R[b, 2, 2]):
+            # Case: R[0, 0] is the largest diagonal element
+            S = torch.sqrt(1.0 + R[b, 0, 0] - R[b, 1, 1] - R[b, 2, 2]) * 2.0  # S = 4 * qx
+            qw = (R[b, 2, 1] - R[b, 1, 2]) / S
+            qx = 0.25 * S
+            qy = (R[b, 0, 1] + R[b, 1, 0]) / S
+            qz = (R[b, 0, 2] + R[b, 2, 0]) / S
+        elif R[b, 1, 1] > R[b, 2, 2]:
+            # Case: R[1, 1] is the largest diagonal element
+            S = torch.sqrt(1.0 + R[b, 1, 1] - R[b, 0, 0] - R[b, 2, 2]) * 2.0  # S = 4 * qy
+            qw = (R[b, 0, 2] - R[b, 2, 0]) / S
+            qx = (R[b, 0, 1] + R[b, 1, 0]) / S
+            qy = 0.25 * S
+            qz = (R[b, 1, 2] + R[b, 2, 1]) / S
+        else:
+            # Case: R[2, 2] is the largest diagonal element
+            S = torch.sqrt(1.0 + R[b, 2, 2] - R[b, 0, 0] - R[b, 1, 1]) * 2.0  # S = 4 * qz
+            qw = (R[b, 1, 0] - R[b, 0, 1]) / S
+            qx = (R[b, 0, 2] + R[b, 2, 0]) / S
+            qy = (R[b, 1, 2] + R[b, 2, 1]) / S
+            qz = 0.25 * S
+
+        quaternions[b] = torch.tensor([qw, qx, qy, qz], device=R.device)
+
+    return quaternions
+
 def quaternion_to_matrix(quaternions):
     """
     Convert a batch of quaternions to a batch of rotation matrices.
@@ -530,7 +582,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         # MLP layers for pose regression
         self.mlp_pose = nn.Sequential(
-            nn.Linear(512 * 2 * 3, 256), # self.hidden_nf
+            nn.Linear(128 * 2 * 3, 256), # self.hidden_nf
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -556,7 +608,6 @@ class CrossAttentionPoseRegression(nn.Module):
         self.mean_pooling = nn.AdaptiveAvgPool1d(1)
         self.bn1 = nn.BatchNorm1d(self.hidden_nf)  # Normalize feature dimension
         self.bn2 = nn.BatchNorm1d((self.hidden_nf+3))  # Normalize feature dimension
-        self.bn3 = nn.BatchNorm1d((self.hidden_nf+3)*2)  # Normalize feature dimension
         # Weight initialization
         self.initialize_weights()
 
@@ -580,30 +631,121 @@ class CrossAttentionPoseRegression(nn.Module):
         similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
 
         # Get top-k scores and indices (k=128)
-        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=512, dim=-1)  # [B, 128]
+        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
 
         # Gather top-k features and corresponding point coordinates
-        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 512)
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 128)
         compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
         compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
 
         compressed_x_src = torch.gather(x_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
         compressed_x_tgt = torch.gather(x_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
 
-        # Concatenate selected source and target coordinates
-        combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, 128, 6]
-        flattened_features = combined_coordinates.view(batch_size, -1)  # [B, 128 * 64]
+        B, N, _ = x_src.shape
 
-        # Predict pose using MLP decoder
-        pose = self.mlp_pose(flattened_features)  # [B, 128, 7] (4 for quaternion, 3 for translation)
-        quaternion = F.normalize(pose[:, :4], p=2, dim=-1)
-        translation = pose[:, 4:]
-        
+        # Step 1: Mask valid correspondences
+        valid_mask = labels.squeeze(-1).bool()  # (B, N)
+
+        # Initialize outputs
+        R = torch.zeros(B, 3, 3, device=x_src.device)
+        t = torch.zeros(B, 3, device=x_src.device)
+
+        for b in range(B):  # Process each batch
+            valid_src_points = x_src[b][valid_mask[b]]
+            valid_tgt_points = x_tgt[b][valid_mask[b]]
+            valid_src_features = h_src[b][valid_mask[b]]
+            valid_tgt_features = h_tgt[b][valid_mask[b]]
+
+            if valid_src_points.shape[0] == 0:  # Skip empty batches
+                R[b] = torch.eye(3, device=x_src.device)
+                t[b] = torch.zeros(3, device=x_src.device)
+                continue
+
+            # Step 2: Compute feature similarity weights
+            feature_diffs = valid_src_features - valid_tgt_features
+            weights = torch.exp(-torch.norm(feature_diffs, dim=1))  # (N_valid,)
+            weights = weights / weights.sum()  # Normalize weights
+
+            # Step 3: Compute weighted centroids
+            src_centroid = (weights[:, None] * valid_src_points).sum(dim=0, keepdim=True)  # (1, 3)
+            tgt_centroid = (weights[:, None] * valid_tgt_points).sum(dim=0, keepdim=True)  # (1, 3)
+
+            # Step 4: Centralize points
+            src_centered = valid_src_points - src_centroid  # (N_valid, 3)
+            tgt_centered = valid_tgt_points - tgt_centroid  # (N_valid, 3)
+
+            # Step 5: Compute weighted cross-covariance matrix
+            H = (weights[:, None, None] * src_centered[:, :, None] @ tgt_centered[:, None, :]).sum(dim=0)  # (3, 3)
+
+            # Step 6: Perform SVD
+            U, S, Vt = torch.linalg.svd(H)
+            R_b = Vt.T @ U.T
+
+            # Ensure proper rotation (det(R) = 1)
+            if torch.det(R_b) < 0:
+                Vt[-1, :] *= -1
+                R_b = Vt.T @ U.T
+
+            # Step 7: Compute translation
+            t_b = tgt_centroid.squeeze() - R_b @ src_centroid.squeeze()
+            # Store results
+            R[b] = R_b
+            t[b] = t_b
+            print(R[b].shape)
+            print(t[b].shape)
+        # # Concatenate selected source and target coordinates
+        # combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, 128, 6]
+        # flattened_features = combined_coordinates.view(batch_size, -1)  # [B, 128 * 64]
+
+        # # Predict pose using MLP decoder
+        # pose = self.mlp_pose(flattened_features)  # [B, 128, 7] (4 for quaternion, 3 for translation)
+
+        # quaternion = F.normalize(pose[:, :4], p=2, dim=-1)
+        # # quaternion = rotation_matrix_to_quaternion_batch(R)
+
+        # translation = pose[:, 4:]
+
+        # Step 8: Combine SVD output into a 4x4 pose matrix
+        initial_pose = torch.eye(4, device=x_src.device).repeat(B, 1, 1)  # [B, 4, 4]
+        initial_pose[:, :3, :3] = R
+        initial_pose[:, :3, 3] = t
+
+        # Step 9: Prepare input for MLP refinement
+        combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, N, 6]
+        flattened_features = combined_coordinates.view(B, -1)  # [B, N * 6]
+
+        # Predict residual pose using MLP decoder
+        delta_pose = self.mlp_pose(flattened_features)  # [B, 7]
+        delta_quaternion = F.normalize(delta_pose[:, :4], p=2, dim=-1)  # Normalize quaternion
+        delta_translation = delta_pose[:, 4:]  # [B, 3]
+
+        # Convert delta_quaternion to rotation matrix
+        delta_rotation = quaternion_to_matrix(delta_quaternion)
+
+        # Apply residual pose refinement
+        refined_R = torch.bmm(delta_rotation, R)  # Refine rotation
+        refined_t = t + delta_translation  # Refine translation
+
+        # Assemble refined pose
+        refined_pose = torch.eye(4, device=x_src.device).repeat(B, 1, 1)  # [B, 4, 4]
+        refined_pose[:, :3, :3] = refined_R
+        refined_pose[:, :3, 3] = refined_t
+
+        quaternion = F.normalize(rotation_matrix_to_quaternion_batch(refined_pose[:, :4]), p=2, dim=-1)
+        # quaternion = rotation_matrix_to_quaternion_batch(R)
+
+        translation = refined_pose[:, :3, 3]
+        # translation = t
         # Optionally, compute loss
         # svd_loss = self.compute_svd_loss(compressed_h_src, compressed_h_tgt)
-
         # Combine all losses (if needed)
         total_loss = None
+        print(quaternion.shape)
+        print(h_src.shape)
+        print(x_src.shape)
+        print(h_tgt.shape)
+        print(x_tgt.shape)
+        print(translation.shape)
 
         return quaternion, translation, total_loss, h_src, x_src, h_tgt, x_tgt, labels
 
@@ -688,7 +830,7 @@ def pose_loss(pred_quaternion, pred_translation, gt_pose, delta=1.5):
     # Extract ground truth translation and rotation
     gt_translation = gt_pose[:, :3, 3]  # Shape: [B, 3]
     gt_rotation = gt_pose[:, :3, :3]    # Shape: [B, 3, 3]
-    gt_quaternion = rotation_matrix_to_quaternion(gt_rotation)  # Convert [B, 3, 3] to [B, 4]
+    gt_quaternion = rotation_matrix_to_quaternion_batch(gt_rotation)  # Convert [B, 3, 3] to [B, 4]
 
     # Normalize ground truth and predicted quaternions
     gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)      # Shape: [B, 4]

@@ -372,19 +372,19 @@ class ThreeDMatchTrainVal(data.Dataset):
         # After sampling labels and getting corresponding pairs
         # remapped_corr = remap_correspondences(sampled_corr, sample_size)
 
-        # # Ensure that all values are mapped independently into the range [0, N-1]
-        unique_indices_first = np.unique(sampled_corr[:, 0])  # Unique values in the first column
-        unique_indices_second = np.unique(sampled_corr[:, 1])  # Unique values in the second column
+        # Extract unique indices from the first and second columns
+        unique_src_indices = np.unique(sampled_corr[:, 0])  # Unique source indices
+        unique_tgt_indices = np.unique(sampled_corr[:, 1])  # Unique target indices
 
-        # Create mappings for each column
-        mapping_first = {val: idx for idx, val in enumerate(unique_indices_first)}
-        mapping_second = {val: idx for idx, val in enumerate(unique_indices_second)}
+        # Create mappings for source and target indices
+        src_mapping = {val: idx for idx, val in enumerate(unique_src_indices)}
+        tgt_mapping = {val: idx for idx, val in enumerate(unique_tgt_indices)}
 
-        # Remap both columns
-        remapped_first = np.array([mapping_first[val] for val in sampled_corr[:, 0]])
-        remapped_second = np.array([mapping_second[val] for val in sampled_corr[:, 1]])
+        # Apply mappings
+        remapped_first = np.array([src_mapping[val] for val in sampled_corr[:, 0]])
+        remapped_second = np.array([tgt_mapping[val] for val in sampled_corr[:, 1]])
 
-        # Combine remapped columns into a new array
+        # Combine into remapped correspondence
         remapped_corr = np.stack((remapped_first, remapped_second), axis=1)
 
         # print(remapped_corr)
@@ -516,11 +516,16 @@ class ThreeDMatchTest(data.Dataset):
         #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
+        # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
-
+        
+        # Get number of available positive samples
         num_available_pos = len(pos_indices)
-        pos_sample_thre = int(sample_size * 0.7)  # 30% threshold for positive samples
+        # print("$$$$$$$$$$$$")
+        # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])
+        
+        pos_sample_thre = int(sample_size * 1.0)  # 30% threshold for positive samples
         sampled_indices = None
         # Initialize sampled indices
         if num_available_pos < pos_sample_thre:
@@ -543,7 +548,12 @@ class ThreeDMatchTest(data.Dataset):
             neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
             # Sort indices
             sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
-        sampled_indices = np.sort(sampled_indices)                      
+        sampled_indices = np.sort(sampled_indices)                    
+
+             # Combine positive and negative indices
+            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
+
+        # sampled_indices = np.random.choice(src_pts.shape[0], sample_size, replace=True)
 
         # Sample source points and features
         sampled_src_pts = src_pts[sampled_indices]
@@ -555,18 +565,20 @@ class ThreeDMatchTest(data.Dataset):
         sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
         sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
 
-        # Create remapping for source indices in the new range
-        remap_src = {old_idx: new_idx for new_idx, old_idx in enumerate(sampled_indices)}
+        # Extract unique indices from the first and second columns
+        unique_src_indices = np.unique(sampled_corr[:, 0])  # Unique source indices
+        unique_tgt_indices = np.unique(sampled_corr[:, 1])  # Unique target indices
 
-        # Create remapping for target indices based on unique sampled target indices
-        unique_tgt_indices = np.unique(sampled_tgt_indices)
-        remap_tgt = {old_idx: new_idx for new_idx, old_idx in enumerate(unique_tgt_indices)}
+        # Create mappings for source and target indices
+        src_mapping = {val: idx for idx, val in enumerate(unique_src_indices)}
+        tgt_mapping = {val: idx for idx, val in enumerate(unique_tgt_indices)}
 
-        # Remap corr source indices to be in the range of self.num_node
-        remapped_corr = np.zeros_like(sampled_corr)
-        remapped_corr[:, 0] = [remap_src[src_idx] for src_idx in sampled_corr[:, 0]]  # Remap source
-        remapped_corr[:, 1] = [remap_tgt[tgt_idx] for tgt_idx in sampled_corr[:, 1]]  # Remap target
+        # Apply mappings
+        remapped_first = np.array([src_mapping[val] for val in sampled_corr[:, 0]])
+        remapped_second = np.array([tgt_mapping[val] for val in sampled_corr[:, 1]])
 
+        # Combine into remapped correspondence
+        remapped_corr = np.stack((remapped_first, remapped_second), axis=1)
         # print(remapped_corr)
         # Retrieve the labels for the resampled source points
         sampled_labels = labels[sampled_indices]

@@ -661,23 +661,28 @@ class CrossAttentionPoseRegression(nn.Module):
                 t[b] = torch.zeros(3, device=x_src.device)
                 continue
 
-            # Step 2: Compute feature similarity weights
-            feature_diffs = valid_src_features - valid_tgt_features
-            weights = torch.exp(-torch.norm(feature_diffs, dim=1))  # (N_valid,)
-            weights = weights / weights.sum()  # Normalize weights
+            # Compute feature similarity weights
+            # feature_diffs = valid_src_features - valid_tgt_features
+            # weights = torch.exp(-torch.norm(feature_diffs, dim=1))  # (N_valid,)
+            # weights = weights / weights.sum()  # Normalize weights
 
-            # Step 3: Compute weighted centroids
+            weight_scores = torch.sum(valid_src_features * valid_tgt_features, dim=-1)  # Shape: (batch_size, N)
+
+            # Optional: Normalize weight scores (e.g., softmax across rows for each batch)
+            weights = torch.nn.functional.softmax(weight_scores, dim=-1)  # Shape: (batch_size, N)
+
+            # Compute weighted centroids
             src_centroid = (weights[:, None] * valid_src_points).sum(dim=0, keepdim=True)  # (1, 3)
             tgt_centroid = (weights[:, None] * valid_tgt_points).sum(dim=0, keepdim=True)  # (1, 3)
 
-            # Step 4: Centralize points
+            # Centralize points
             src_centered = valid_src_points - src_centroid  # (N_valid, 3)
             tgt_centered = valid_tgt_points - tgt_centroid  # (N_valid, 3)
 
-            # Step 5: Compute weighted cross-covariance matrix
+            # weighted cross-covariance matrix
             H = (weights[:, None, None] * src_centered[:, :, None] @ tgt_centered[:, None, :]).sum(dim=0)  # (3, 3)
 
-            # Step 6: Perform SVD
+            # erform SVD
             U, S, Vt = torch.linalg.svd(H)
             R_b = Vt.T @ U.T
 
@@ -686,13 +691,12 @@ class CrossAttentionPoseRegression(nn.Module):
                 Vt[-1, :] *= -1
                 R_b = Vt.T @ U.T
 
-            # Step 7: Compute translation
+            # Compute translation
             t_b = tgt_centroid.squeeze() - R_b @ src_centroid.squeeze()
             # Store results
             R[b] = R_b
             t[b] = t_b
-            print(R[b].shape)
-            print(t[b].shape)
+
         # # Concatenate selected source and target coordinates
         # combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, 128, 6]
         # flattened_features = combined_coordinates.view(batch_size, -1)  # [B, 128 * 64]
@@ -740,12 +744,6 @@ class CrossAttentionPoseRegression(nn.Module):
         # svd_loss = self.compute_svd_loss(compressed_h_src, compressed_h_tgt)
         # Combine all losses (if needed)
         total_loss = None
-        print(quaternion.shape)
-        print(h_src.shape)
-        print(x_src.shape)
-        print(h_tgt.shape)
-        print(x_tgt.shape)
-        print(translation.shape)
 
         return quaternion, translation, total_loss, h_src, x_src, h_tgt, x_tgt, labels
 
@@ -960,9 +958,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
 
         # Combine the normalized losses if needed
         total_loss = rot_loss_mean + trans_loss_mean + point_error 
-        print("#####################")
-        print(rot_loss_mean)
-        print(trans_loss_mean)
+        # print("#####################")
+        # print(rot_loss_mean)
+        # print(trans_loss_mean)
 
         # Combine pose and correspondence losses
         loss = total_loss #+ beta * corr_loss

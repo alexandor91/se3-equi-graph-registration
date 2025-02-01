@@ -564,7 +564,7 @@ def center_and_normalize(src_pts, tar_pts):
 
 
 class CrossAttentionPoseRegression(nn.Module):
-    def __init__(self, egnn, num_nodes=2048, hidden_nf=32, device='cuda:0'):
+    def __init__(self, egnn, num_nodes=2048, hidden_nf=33, device='cuda:0'):
         super(CrossAttentionPoseRegression, self).__init__()
         self.egnn = egnn
         self.hidden_nf = hidden_nf
@@ -572,12 +572,12 @@ class CrossAttentionPoseRegression(nn.Module):
         self.device = device
 
         # MLP layers for compression
-        self.mlp_compress = nn.Sequential(
-            nn.Linear(num_nodes, num_nodes // 2),
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * hidden_nf, hidden_nf),
             nn.ReLU(),
-            nn.Linear(num_nodes // 2, num_nodes // 4),
+            nn.Linear(hidden_nf, hidden_nf // 2),
             nn.ReLU(),
-            nn.Linear(num_nodes // 4, 128)
+            nn.Linear(hidden_nf // 2, 1),
         )
 
         # MLP layers for pose regression
@@ -627,22 +627,22 @@ class CrossAttentionPoseRegression(nn.Module):
         batch_size, num_points, feature_dim = h_src.shape
         device = h_src.device
 
+        B, N, _ = x_src.shape
         # Row-wise dot product between h_src and h_tgt (resulting in B x N x 1)
         similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
 
         # Get top-k scores and indices (k=128)
-        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
+        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=N, dim=-1)  # [B, 128]
 
         # Gather top-k features and corresponding point coordinates
-        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 128)
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, N)
         compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
         compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
 
         compressed_x_src = torch.gather(x_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
         compressed_x_tgt = torch.gather(x_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, 3))  # [B, 128, 3]
 
-        B, N, _ = x_src.shape
-
+        compressed_labels = torch.gather(labels, dim=1, index=top_indices)  # [B, 128]
         # Step 1: Mask valid correspondences
         valid_mask = labels.squeeze(-1).bool()  # (B, N)
 
@@ -697,43 +697,54 @@ class CrossAttentionPoseRegression(nn.Module):
             R[b] = R_b
             t[b] = t_b
 
+        # Concatenate along the feature dimension
+        concat_h = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: (batch_size, N, 2 * feature_dim)
+        print("Concat shape:", concat_h.shape)
+
+        # Reshape for MLP
+        batch_size, N, hidden_feat_size = concat_h.shape
+        concat_h = concat_h.view(-1, hidden_feat_size)  # Reshape to (batch_size * N, 2 * feature_dim)
+        print("Reshaped for MLP:", concat_h.shape)
+
+        # Pass through MLP
+        scores = self.mlp(concat_h)  # Shape: (batch_size * N, 1)
+
+        # Reshape back to (batch_size, N, 1)
+        scores = scores.view(batch_size, N, -1)  # Shape: (batch_size, N, 1)
+
+        print(scores.shape)
+        # Reshape back to (batch_size, N, 1)
+        scores = scores.view(batch_size, N)
+
+        criterion = nn.BCEWithLogitsLoss()  # Binary cross-entropy with logits
+        corr_loss = criterion(scores, compressed_labels)
         # # Concatenate selected source and target coordinates
         # combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, 128, 6]
         # flattened_features = combined_coordinates.view(batch_size, -1)  # [B, 128 * 64]
 
         # # Predict pose using MLP decoder
         # pose = self.mlp_pose(flattened_features)  # [B, 128, 7] (4 for quaternion, 3 for translation)
-
         # quaternion = F.normalize(pose[:, :4], p=2, dim=-1)
         # # quaternion = rotation_matrix_to_quaternion_batch(R)
-
         # translation = pose[:, 4:]
 
-        # Step 8: Combine SVD output into a 4x4 pose matrix
-        initial_pose = torch.eye(4, device=x_src.device).repeat(B, 1, 1)  # [B, 4, 4]
-        initial_pose[:, :3, :3] = R
-        initial_pose[:, :3, 3] = t
+        # # Step 9: Prepare input for MLP refinement
+        # combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, N, 6]
+        # flattened_features = combined_coordinates.view(B, -1)  # [B, N * 6]
+        # # Predict residual pose using MLP decoder
+        # delta_pose = self.mlp_pose(flattened_features)  # [B, 7]
+        # delta_quaternion = F.normalize(delta_pose[:, :4], p=2, dim=-1)  # Normalize quaternion
+        # delta_translation = delta_pose[:, 4:]  # [B, 3]
+        # # Convert delta_quaternion to rotation matrix
+        # delta_rotation = quaternion_to_matrix(delta_quaternion)
+        # # Apply residual pose refinement
+        # refined_R = torch.bmm(delta_rotation, R)  # Refine rotation
+        # refined_t = t + delta_translation  # Refine translation
 
-        # Step 9: Prepare input for MLP refinement
-        combined_coordinates = torch.cat([compressed_x_src, compressed_x_tgt], dim=-1)  # [B, N, 6]
-        flattened_features = combined_coordinates.view(B, -1)  # [B, N * 6]
-
-        # Predict residual pose using MLP decoder
-        delta_pose = self.mlp_pose(flattened_features)  # [B, 7]
-        delta_quaternion = F.normalize(delta_pose[:, :4], p=2, dim=-1)  # Normalize quaternion
-        delta_translation = delta_pose[:, 4:]  # [B, 3]
-
-        # Convert delta_quaternion to rotation matrix
-        delta_rotation = quaternion_to_matrix(delta_quaternion)
-
-        # Apply residual pose refinement
-        refined_R = torch.bmm(delta_rotation, R)  # Refine rotation
-        refined_t = t + delta_translation  # Refine translation
-
-        # Assemble refined pose
+        # # Assemble refined pose
         refined_pose = torch.eye(4, device=x_src.device).repeat(B, 1, 1)  # [B, 4, 4]
-        refined_pose[:, :3, :3] = refined_R
-        refined_pose[:, :3, 3] = refined_t
+        refined_pose[:, :3, :3] = R
+        refined_pose[:, :3, 3] = t
 
         quaternion = F.normalize(rotation_matrix_to_quaternion_batch(refined_pose[:, :4]), p=2, dim=-1)
         # quaternion = rotation_matrix_to_quaternion_batch(R)
@@ -743,9 +754,8 @@ class CrossAttentionPoseRegression(nn.Module):
         # Optionally, compute loss
         # svd_loss = self.compute_svd_loss(compressed_h_src, compressed_h_tgt)
         # Combine all losses (if needed)
-        total_loss = None
 
-        return quaternion, translation, total_loss, h_src, x_src, h_tgt, x_tgt, labels
+        return quaternion, translation, corr_loss, h_src, x_src, h_tgt, x_tgt, labels
 
     
 def compute_losses(quaternion, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels):
@@ -885,10 +895,6 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # xyz_0_flat = xyz_0.view(-1, xyz_0.size(-1))  # Shape: [batch_size * num_points, 3]
         # xyz_1_flat = xyz_1.view(-1, xyz_1.size(-1))
 
-        # # Create the batch tensor for KNN graph
-        # batch_tensor = torch.arange(batch_size, device=device).repeat_interleave(num_points)
-
-        # Compute KNN graphs
         # Input: xyz_0 and xyz_1 are tensors of shape [batch_size, 2048, 3]
         batch_size, num_points, _ = xyz_0.shape
 
@@ -955,12 +961,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # trans_loss_mean = torch.mean(scaled_trans_losses)
         rot_loss_mean = rot_losses.mean()  # Normalize rotation loss across the batch
         trans_loss_mean = trans_losses.mean()  # Normalize translation loss across the batch
-
+        corr_loss_mean = corr_loss.mean()
         # Combine the normalized losses if needed
-        total_loss = rot_loss_mean + trans_loss_mean + point_error 
-        # print("#####################")
-        # print(rot_loss_mean)
-        # print(trans_loss_mean)
+        total_loss = corr_loss_mean ### rot_loss_mean + trans_loss_mean + point_error 
 
         # Combine pose and correspondence losses
         loss = total_loss #+ beta * corr_loss
@@ -1275,10 +1278,10 @@ def get_args():
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
-    parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
-    parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
-    parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
+    parser.add_argument('--in_node_nf', type=int, default=33, help='Input feature size for EGNN')
+    parser.add_argument('--hidden_node_nf', type=int, default=33, help='Hidden node feature size for EGNN') ### fpfh 33 fcgf 32
+    parser.add_argument('--sim_hidden_nf', type=int, default=33, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--out_node_nf', type=int, default=33, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
     parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
@@ -1289,6 +1292,7 @@ def get_args():
 if __name__ == "__main__":
     args = get_args()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     # print("###edge batch begins ###########")
     # # Set up the data and training parameters
     # Load the arguments

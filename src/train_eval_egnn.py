@@ -285,6 +285,8 @@ class E_GCL(nn.Module):
 
 
     def coord2radial(self, edge_index, coord):
+        print("!!!!!! $$$$$$$ !!!!!!!")
+        print(edge_index)
         row, col = edge_index
         coord_diff = coord[row] - coord[col]
         radial = torch.sum(coord_diff**2, -1).unsqueeze(-1)
@@ -391,6 +393,8 @@ def get_edges_batch(graph_idx, n_nodes, batch_size):
     """
     Adapted version of the original function to use a sparse edge index `graph_idx`.
     """
+    print("$$$$$$$$$ @@@@@@@ $$$$$$$$")
+    print(graph_idx.shape)
     # Get the edges (source and target indices) from graph_idx
     edges = get_edges_from_idx(graph_idx)
     # Create edge attributes (dummy values set to 1)
@@ -636,6 +640,9 @@ class CrossAttentionPoseRegression(nn.Module):
         # Move everything to the same device (GPU/CPU)
         h_src = h_src.to(self.device)
         x_src = x_src.to(self.device)
+        print("########### !!!!!!!! ######")
+        print(edges_src[0].shape)
+        print(edge_attr_src.shape)
 
         # Ensure edge indices are tensors and move them to the correct device
         if isinstance(edges_src, list):
@@ -662,8 +669,8 @@ class CrossAttentionPoseRegression(nn.Module):
             labels = labels.squeeze(0)
 
 
-        # h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
-        # h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
+        h_src, x_src = self.egnn(h_src, x_src, edges_src, edge_attr_src)  # Shape: [2048, hidden_nf]
+        h_tgt, x_tgt = self.egnn(h_tgt, x_tgt, edges_tgt, edge_attr_tgt)  # Shape: [2048, hidden_nf]
         # Normalize features for Hadamard product (L2 normalization)
         h_src_norm = F.normalize(h_src, p=2, dim=-1)
         h_tgt_norm = F.normalize(h_tgt, p=2, dim=-1)
@@ -1064,6 +1071,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
         # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
         # Initialize edges and edge attributes for source and target
+        print("@@@@@@@  !!!!! @@@@ !!!!!!!! @@@@@@@@@")
+        print(graph_idx_0.shape)
+
         edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
         edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
 
@@ -1428,7 +1438,7 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
             gt_pose = gt_pose.to(device)
 
             # KNN graph computation (same as in training)
-            k = 12
+            k = 16
             graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
             graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
 

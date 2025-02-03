@@ -283,13 +283,15 @@ class ThreeDMatchTrainVal(data.Dataset):
             data = pickle.load(f)
 
         # Extract data
-        src_pts = data.get('xyz_0')  # Nx3
-        tar_pts = data.get('xyz_1')  # Mx3
-        src_features = data.get('feat_0')  # Nx32
-        tgt_features = data.get('feat_1')  # Mx32
-        corr = data.get('corr')  # Correspondence (Nx2)
-        labels = data.get('labels')  # Binary labels (N,)
-        gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
+        # Assuming `data` is loaded from the .pkl file
+        src_pts = data.get('src_keypts').squeeze(0).numpy()  # Shape: (31380, 3)
+        tar_pts = data.get('tgt_keypts').squeeze(0).numpy()  # Shape: (31380, 3)
+        src_features = data.get('src_features').squeeze(0).numpy()  # Shape: (31380, 32)
+        tgt_features = data.get('tgt_features').squeeze(0).numpy()  # Shape: (31380, 32)
+        corr = data.get('corr').squeeze(0).numpy()  # Shape: (31380, 2)
+        labels = data.get('gt_labels').squeeze(0).numpy()  # Shape: (31380,)
+        gt_trans = data.get('gt_pose').squeeze(0).numpy()  # Shape: (4, 4)
+
 
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':

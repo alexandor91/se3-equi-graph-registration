@@ -23,7 +23,7 @@ def calculate_pose_error(gt_pose, pred_pose):
 
     return rotation_error, translation_error
 
-def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.05):
+def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.09):
     """Calculate the registration recall based on the equation in the provided image."""
     # Apply the predicted transformation to the source points
     src_transformed = (pred_pose[:3, :3] @ src_pts.T).T + pred_pose[:3, 3]
@@ -31,13 +31,16 @@ def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.05):
     # Compute the Euclidean distance between transformed source and target points
     distances = np.linalg.norm(src_transformed - tgt_pts, axis=1)
 
-    # Count how many points are below the threshold tau
-    valid_count = np.sum(distances < tau)
+    # Count True Positive Matches (below threshold tau)
+    true_positives = np.sum(distances < tau)
 
-    # Compute the recall
-    recall = np.sqrt(valid_count / len(src_pts))
+    # Recall: sqrt(TP / Total ground truth points)
+    recall = np.sqrt(true_positives / len(src_pts))
 
-    return recall
+    # Precision: TP / Total predicted points (source transformed points)
+    precision = true_positives / len(src_transformed) if len(src_transformed) > 0 else 0.0
+
+    return recall, precision
 
 def evaluate_pairwise_frames(gt_file_list, pred_file_list, gt_dir, pred_dir, save_dir):
     assert len(gt_file_list) == len(pred_file_list), "Ground truth and prediction file lists must have the same length."

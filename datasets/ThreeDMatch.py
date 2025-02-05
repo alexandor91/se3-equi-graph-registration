@@ -13,6 +13,7 @@ import numpy as np
 import random
 import torch
 import time
+np.random.seed(42)  # You can choose any integer valuem as seed
 
 def rotation_matrix(num_axis, augment_rotation):
     """
@@ -292,7 +293,6 @@ class ThreeDMatchTrainVal(data.Dataset):
         labels = data.get('gt_labels').squeeze(0).numpy()  # Shape: (31380,)
         gt_trans = data.get('gt_pose').squeeze(0).numpy()  # Shape: (4, 4)
 
-
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
             src_features = src_features / (np.linalg.norm(src_features, axis=1, keepdims=True) + 1e-6)
@@ -328,9 +328,7 @@ class ThreeDMatchTrainVal(data.Dataset):
         # Get number of available positive samples
         num_available_pos = len(pos_indices)
         # print("$$$$$$$$$$$$")
-        # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])
-        
-        num_available_pos = len(pos_indices)
+        # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])        
         pos_sample_thre = int(sample_size * 1.0)  # 30% threshold for positive samples
         sampled_indices = None
         # Initialize sampled indices
@@ -474,19 +472,31 @@ class ThreeDMatchTest(data.Dataset):
             self.test_file_list = [line.strip() for line in f.readlines()]
 
     def __getitem__(self, index):
-        file_name = self.file_list[index]
+        file_name = self.test_file_list[index]
         # Load data from .pkl file
-        with open(os.path.join(self.root, 'train_3dmatch', file_name), 'rb') as f:
+        with open(os.path.join(self.root, 'test_3dmatch', file_name), 'rb') as f:
             data = pickle.load(f)
 
         # Extract data
-        src_pts = data.get('xyz_0')  # Nx3
-        tar_pts = data.get('xyz_1')  # Mx3
-        src_features = data.get('feat_0')  # Nx32
-        tgt_features = data.get('feat_1')  # Mx32
-        corr = data.get('corr')  # Correspondence (Nx2)
-        labels = data.get('labels')  # Binary labels (N,)
-        gt_trans = data.get('gt_pose')  # 4x4 ground truth transformation
+        # Assuming `data` is loaded from the .pkl file
+        # src_pts = data.get('src_keypts').squeeze(0).numpy()  # Shape: (31380, 3)
+        # tar_pts = data.get('tgt_keypts').squeeze(0).numpy()  # Shape: (31380, 3)
+        # src_features = data.get('src_features').squeeze(0).numpy()  # Shape: (31380, 32)
+        # tgt_features = data.get('tgt_features').squeeze(0).numpy()  # Shape: (31380, 32)
+        # corr = data.get('corr').squeeze(0).numpy()  # Shape: (31380, 2)
+        # labels = data.get('gt_labels').squeeze(0).numpy()  # Shape: (31380,)
+        # gt_trans = data.get('gt_pose').squeeze(0).numpy()  # Shape: (4, 4)
+        src_pts = data.get('xyz_0')  # Shape: (N, 3)
+        tar_pts = data.get('xyz_1')  # Shape: (N, 3)
+        if self.descriptor == 'fcgf':
+            src_features = data.get('feat_0')[:, :32]  # Shape: (N, 32)
+            tgt_features = data.get('feat_1')[:, :32]  # Shape: (N, 32)
+        else:
+            src_features = data.get('feat_0')  # Shape: (N, 32)
+            tgt_features = data.get('feat_1')  # Shape: (N, 32)
+        corr = data.get('corr')  # Shape: (31380, 2)
+        labels = data.get('labels')  # Shape: (31380,)
+        gt_trans = data.get('gt_pose')  # Shape: (4, 4)
 
         # Normalize features if using FPFH descriptor
         if self.descriptor == 'fpfh':
@@ -498,8 +508,7 @@ class ThreeDMatchTest(data.Dataset):
         # Count the number of ones
         # num_ones = np.count_nonzero(labels == 1)
 
-        # print(f"Number of ones: {num_ones}")
-        
+                
         # Sort the points by ray length to sensor origin for ordering
         sensor_origin = np.array([0, 0, 0])
         ray_lengths_src = np.linalg.norm(src_pts - sensor_origin, axis=1)
@@ -518,97 +527,51 @@ class ThreeDMatchTest(data.Dataset):
         #     print("Warning: Not enough sample points for the fixed number, sampling with repetitions.")
         
         # Separate indices for positive and negative labels
-        # Separate indices for positive and negative labels
         pos_indices = np.where(labels == 1)[0]
         neg_indices = np.where(labels == 0)[0]
         
         # Get number of available positive samples
         num_available_pos = len(pos_indices)
-        # print("$$$$$$$$$$$$")
-        # # print(src_features[corr[pos_indices[10]][0]] @ tgt_features[corr[pos_indices[10]][1]])
-        
-        pos_sample_thre = int(sample_size * 1.0)  # 30% threshold for positive samples
-        sampled_indices = None
-        # Initialize sampled indices
-        if num_available_pos < pos_sample_thre:
-            # If very few positive samples, use all positives
-            pos_sampled = pos_indices
-            if num_available_pos < sample_size:
-                num_neg_needed = sample_size - num_available_pos
-            else:
-                num_neg_needed = 0
-            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
-            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
-            # Sort indices
 
-            # Combine positive and negative indices
-            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])
-        elif num_available_pos >= pos_sample_thre:
-            # If too many positives, sample to fit sample_size
-            pos_sampled = np.random.choice(pos_indices, pos_sample_thre, replace=False)
-            num_neg_needed = sample_size - pos_sample_thre
-            neg_sampled = np.random.choice(neg_indices, num_neg_needed, replace=True)
-            # Sort indices
-            sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
-        sampled_indices = np.sort(sampled_indices)                    
+        # Mask valid correspondences
+        valid_mask = labels.astype(bool)  # (N,)
+        print(valid_mask.shape)
 
-             # Combine positive and negative indices
-            # sampled_indices = np.concatenate([pos_sampled, neg_sampled])       
-
-        # sampled_indices = np.random.choice(src_pts.shape[0], sample_size, replace=True)
-
-        # Sample source points and features
-        sampled_src_pts = src_pts[sampled_indices]
-        sampled_src_features = src_features[sampled_indices]
-
+        valid_src_points = src_pts[valid_mask]  # (N_valid, 3)
         # Use the second column of corr to get corresponding target indices
-        sampled_corr = corr[sampled_indices]  # Nx2
-        sampled_tgt_indices = sampled_corr[:, 1].astype(int)  # Get target indices
-        sampled_tgt_pts = tar_pts[sampled_tgt_indices]  # Get corresponding target points
-        sampled_tgt_features = tgt_features[sampled_tgt_indices]  # Get target descriptors
+        sampled_tgt_indices = corr[:, 1].astype(int)  # Get target indices
+        sampled_tgt_points = tar_pts[sampled_tgt_indices]  # Get corresponding target points
+        sampled_tgt_features = tgt_features[sampled_tgt_indices]
+        valid_src_features = src_features[valid_mask]  # (N_valid, D)
+        
+        valid_tgt_points = sampled_tgt_points[valid_mask]        
+        valid_tgt_features = sampled_tgt_features[valid_mask]  # (N_valid, D)
+        valid_labels = labels[valid_mask]
+        valid_corr = corr[valid_mask]
 
-        # Extract unique indices from the first and second columns
-        unique_src_indices = np.unique(sampled_corr[:, 0])  # Unique source indices
-        unique_tgt_indices = np.unique(sampled_corr[:, 1])  # Unique target indices
+        sample_num = 2048
+        N_valid = valid_src_points.shape[0]
+        if N_valid < sample_num:
+            # If not enough points, pad with random choice (with replacement)
+            sampled_indices = np.random.choice(N_valid, sample_num, replace=True)
+        else:
+            # Randomly sample 2048 points
+            sampled_indices = np.random.choice(N_valid, sample_num, replace=False)
+        
+        sampled_src_points = valid_src_points[sampled_indices]  # Shape: (2048, 3)
+        sampled_tar_points = valid_tgt_points[sampled_indices]  # Shape: (2048, 3)
+        sampled_src_features = valid_src_features[sampled_indices]  # Shape: (2048, 3)
+        sampled_tar_features = valid_tgt_features[sampled_indices]  # Shape: (2048, 3)
+        sampled_labels = valid_labels[sampled_indices]
+        sampled_corr = valid_corr[sampled_indices]
 
-        # Create mappings for source and target indices
-        src_mapping = {val: idx for idx, val in enumerate(unique_src_indices)}
-        tgt_mapping = {val: idx for idx, val in enumerate(unique_tgt_indices)}
-
-        # Apply mappings
-        remapped_first = np.array([src_mapping[val] for val in sampled_corr[:, 0]])
-        remapped_second = np.array([tgt_mapping[val] for val in sampled_corr[:, 1]])
-
-        # Combine into remapped correspondence
-        remapped_corr = np.stack((remapped_first, remapped_second), axis=1)
+        # print("@@@@@@@@@@@@   @@@@@@@@@@@")
         # print(remapped_corr)
-        # Retrieve the labels for the resampled source points
-        sampled_labels = labels[sampled_indices]
-
-        # # Now remap target indices
         # remap_tgt = {old: new for new, old in enumerate(np.unique(orig_tgt_indices))}
         # sampled_corr[:, 1] = np.array([remap_tgt.get(idx, -1) for idx in sampled_corr[:, 1]])  # Safely map target indices
-        
-        # Data augmentation
-        if self.synthetic_pose_flag:
-            sampled_src_pts += np.random.rand(sample_size, 3) * 0.005
-            # sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
-            aug_R = rotation_matrix(self.augment_axis, self.augment_rotation)
-            aug_T = translation_matrix(self.augment_translation)
-            aug_trans = integrate_trans(aug_R, aug_T)
-            sampled_tgt_pts = transform(sampled_src_pts, aug_trans)
-            sampled_tgt_pts += np.random.rand(sample_size, 3) * 0.005
-            gt_trans = concatenate(aug_trans, np.eye(4).astype(np.float32))
-            sampled_tgt_features = sampled_src_features
-            # Create sampled_labels as an array of ones with shape (self.num_node,)
-            sampled_labels = np.ones(self.num_node, dtype=np.float32)
-
-            # Create remapped_corr as a (self.num_node, 2) array
-            remapped_corr = np.arange(self.num_node, dtype=np.float32).reshape(-1, 1)
-            remapped_corr = np.hstack((remapped_corr, remapped_corr))
-
-            
-
+        # print("@@@@@@@@@@ sim scores @@@@@@@@@@@@@")
+        # similarity_matrix = np.dot(sampled_src_features, sampled_tgt_features.T)  # Shape: N x 2048
+           
 
         # Optional normalization
         if self.normalize_use:
@@ -616,14 +579,13 @@ class ThreeDMatchTest(data.Dataset):
             centroid = np.mean(sampled_src_pts, axis=0)
             sampled_src_pts -= centroid
 
-        return remapped_corr.astype(np.float32), \
+        return sampled_corr.astype(np.float32), \
             sampled_labels.astype(np.float32), \
-            sampled_src_pts.astype(np.float32), \
-            sampled_tgt_pts.astype(np.float32), \
+            sampled_src_points.astype(np.float32), \
+            sampled_tar_points.astype(np.float32), \
             sampled_src_features.astype(np.float32), \
-            sampled_tgt_features.astype(np.float32), \
+            sampled_tar_features.astype(np.float32), \
             gt_trans.astype(np.float32)
-
                   
 
     def __len__(self):

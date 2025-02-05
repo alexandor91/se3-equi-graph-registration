@@ -1506,7 +1506,7 @@ def get_args():
     
     # Add arguments with default values
     parser.add_argument('--base_dir', type=str, default="/media/eavise3d/新加卷/Datasets/luan-scripts/3DMatch/3DMatch", help='Path to the dataset')  ### /home/eavise3d/Downloads/3DMatch_FPFH_Feature
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')

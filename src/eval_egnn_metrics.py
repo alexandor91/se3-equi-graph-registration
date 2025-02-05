@@ -34,14 +34,14 @@ from torch_cluster import knn_graph
 from torch_scatter import scatter_add
 from torch.utils.tensorboard import SummaryWriter
 import sys
-import importlib.utilsss
+import importlib.util
 # Get the path to the project root directory
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 # Add the project root to the Python path
 sys.path.insert(0, project_root)
 
-from tools.evaluation_metrics import calculate_pose_error, registration_recall, quat_to_mat  #####, evaluate_pairwise_frames
+from tools.evaluation_metrics import calculate_pose_error, registration_recall, quaternion_to_matrix  #####, evaluate_pairwise_frames
 # Now you can import from datasets
 from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
@@ -58,7 +58,6 @@ from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
 
 torch.cuda.manual_seed(2)
-
 
 class PointNetLayer(MessagePassing):
     def __init__(self, in_channels: int, out_channels: int):
@@ -627,6 +626,10 @@ class CrossAttentionPoseRegression(nn.Module):
     def forward(self, h_src, x_src, edges_src, edge_attr_src, h_tgt, x_tgt, edges_tgt, edge_attr_tgt, corr, labels, gt_pose):
         batch_size, num_points, feature_dim = h_src.shape
         device = h_src.device
+        org_h_src = h_src
+        org_h_tar = h_tgt
+        org_x_src = x_src
+        org_x_tgt = x_tgt
 
         # Initialize lists to store the results
         h_src_list, x_src_list = [], []
@@ -668,7 +671,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
         B, N, _ = x_src.shape
         # Row-wise dot product between h_src and h_tgt (resulting in B x N x 1)
-        similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
+        similarity_scores = torch.sum(org_h_src * org_h_tar, dim=-1, keepdim=True)  # [B, N, 1]
 
         # Get top-k scores and indices (k=128)
         top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
@@ -690,10 +693,10 @@ class CrossAttentionPoseRegression(nn.Module):
         t = torch.zeros(B, 3, device=x_src.device)
 
         for b in range(B):  # Process each batch
-            valid_src_points = x_src[b][valid_mask[b]]
-            valid_tgt_points = x_tgt[b][valid_mask[b]]
-            valid_src_features = h_src[b][valid_mask[b]]
-            valid_tgt_features = h_tgt[b][valid_mask[b]]
+            valid_src_points = org_x_src[b][valid_mask[b]]
+            valid_tgt_points = org_x_tgt[b][valid_mask[b]]
+            valid_src_features = org_x_src[b][valid_mask[b]]
+            valid_tgt_features = org_x_tgt[b][valid_mask[b]]
 
             if valid_src_points.shape[0] == 0:  # Skip empty batches
                 R[b] = torch.eye(3, device=x_src.device)
@@ -704,7 +707,45 @@ class CrossAttentionPoseRegression(nn.Module):
             # feature_diffs = valid_src_features - valid_tgt_features
             # weights = torch.exp(-torch.norm(feature_diffs, dim=1))  # (N_valid,)
             # weights = weights / weights.sum()  # Normalize weights
-            weight_scores = torch.sum(valid_src_features * valid_tgt_features, dim=-1)
+            # Concatenate features and pass through MLP
+            concat_h = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # [B, 128, 2 * feature_dim]
+
+            batch_size, N, hidden_feat_size = concat_h.shape
+            concat_h = concat_h.view(-1, hidden_feat_size)  # Reshape to (batch_size * N, 2 * feature_dim)
+
+            # # Pass through MLP
+            pred_scores = self.mlp(concat_h).squeeze(-1)  # [B, N]
+            top_k = 128
+
+            # Compute original similarity scores before EGNN
+            org_similarity_scores = torch.sum(org_h_src * org_h_tar, dim=-1, keepdim=True)  # [B, N, 1]
+
+            # Get top-k scores and indices
+            top_scores, top_indices = torch.topk(org_similarity_scores.squeeze(-1), k=top_k, dim=-1)  # [B, 128]
+
+            # Gather top-k features and corresponding point coordinates
+            batch_indices = torch.arange(B, device=device).view(-1, 1).expand(-1, top_k)
+
+            compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  
+            compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  
+
+            # Get the corresponding original similarity scores for top-k
+            org_similarity_scores_topk = torch.gather(org_similarity_scores, dim=1, index=top_indices.unsqueeze(-1))  
+
+            # **Update Weights Based on Conditions**
+            condition1 = (pred_scores > 0.5) & (torch.abs(pred_scores - 1) < org_similarity_scores_topk)
+            condition2 = (pred_scores > 0.5) & ((pred_scores - 0) < (org_similarity_scores_topk - 0))
+
+            final_weights_topk = torch.where(condition1 | condition2, pred_scores, org_similarity_scores_topk)  # [B, 128, 1]
+
+            # **Reinsert final_weights_topk back into full tensor shape [B, N, 1]**
+            final_weights = org_similarity_scores.clone()  # Preserve original shape
+            final_weights.scatter_(dim=1, index=top_indices.unsqueeze(-1), src=final_weights_topk)
+
+            # **Renormalize final_weights**
+            final_weights = final_weights / (final_weights.sum(dim=1, keepdim=True) + 1e-6)  # Ensure stability
+
+            weight_scores = final_weights.squeeze(0).squeeze(-1)
             weights = torch.nn.functional.softmax(weight_scores, dim=-1)
             
             # Debug check
@@ -715,7 +756,7 @@ class CrossAttentionPoseRegression(nn.Module):
 
             src_centroid = (weights[:, None] * valid_src_points).sum(dim=0, keepdim=True)
             tgt_centroid = (weights[:, None] * valid_tgt_points).sum(dim=0, keepdim=True)
-
+            
             src_centered = valid_src_points - src_centroid
             tgt_centered = valid_tgt_points - tgt_centroid
 
@@ -749,32 +790,12 @@ class CrossAttentionPoseRegression(nn.Module):
         # Concatenate along the feature dimension
         concat_h = torch.cat([compressed_h_src, compressed_h_tgt], dim=-1)  # Shape: (batch_size, N, 2 * feature_dim)
 
-        # Reshape for MLP
-        batch_size, N, hidden_feat_size = concat_h.shape
-        concat_h = concat_h.view(-1, hidden_feat_size)  # Reshape to (batch_size * N, 2 * feature_dim)
-
-        # Pass through MLP
-        scores = self.mlp(concat_h)  # Shape: (batch_size * N, 1)
-
-        # Reshape back to (batch_size, N, 1)
-        scores = scores.view(batch_size, N)
-
-        criterion = nn.BCEWithLogitsLoss()  # Binary cross-entropy with logits
-        corr_loss = criterion(scores, compressed_labels)
-        # corr_loss = F.mse_loss(scores, compressed_labels.float())  # Enforce similarity for correct matches
-
-        # # Assemble refined pose
-        refined_pose = torch.eye(4, device=x_src.device).repeat(B, 1, 1)  # [B, 4, 4]
-        refined_pose[:, :3, :3] = R
-        refined_pose[:, :3, 3] = t
-        quaternion = F.normalize(rotation_matrix_to_quaternion_batch(refined_pose[:, :4]), p=2, dim=-1)
-        translation = refined_pose[:, :3, 3]
         # translation = t
         # Optionally, compute loss
         # svd_loss = self.compute_svd_loss(compressed_h_src, compressed_h_tgt)
         # Combine all losses (if needed)
-
-        return R, t, corr_loss, total_loss, h_src, x_src, h_tgt, x_tgt, labels
+        scores = None
+        return R, t, scores, total_loss, h_src, x_src, h_tgt, x_tgt, labels
 
     
 def compute_losses(rot, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels):
@@ -893,7 +914,19 @@ def pose_loss(pred_rot, pred_translation, gt_pose, delta=1.5):
     # Extract ground truth translation and rotation
     gt_translation = gt_pose[:, :3, 3]  # Shape: [B, 3]
     gt_rotation = gt_pose[:, :3, :3]    # Shape: [B, 3, 3]
+    # gt_quaternion = rotation_matrix_to_quaternion_batch(gt_rotation)  # Convert [B, 3, 3] to [B, 4]
 
+    # Normalize ground truth and predicted quaternions
+    # gt_quaternion = F.normalize(gt_quaternion, p=2, dim=-1)      # Shape: [B, 4]
+    # pred_quaternion = F.normalize(pred_quaternion, p=2, dim=-1)  # Shape: [B, 4]
+
+    # # Convert predicted quaternion to rotation matrix
+    # pred_rotation = quaternion_to_matrix(pred_quaternion)  # Shape: [B, 3, 3]
+
+    # pred_rotation_3x3 = R[:, :3, :3]
+    # gt_rotation_3x3 = gt_rotation[:, :3, :3]
+
+    # Compute rotation difference R_diff = R_est^T * R_gt
     R_diff = torch.bmm(pred_rot.transpose(1, 2), gt_rotation)  # Batch matrix multiplication
     
     # Convert rotation matrices to axis-angle representation
@@ -929,7 +962,6 @@ def pose_loss(pred_rot, pred_translation, gt_pose, delta=1.5):
     translation_loss = torch.arccos(torch.clamp(cosine_similarity, min=-1, max=1))  # Shape: [B]
 
     return rotation_loss, translation_loss
-   
 
 # Save the checkpoint
 def save_checkpoint(epoch, pointnet, egnn, cross_attention, optimizer, save_dir="./checkpoints", is_best=False, use_pointnet=False):
@@ -1059,103 +1091,173 @@ def evaluate_model(checkpoint_path, save_dir, model, dataloader, device, use_poi
 
     with torch.no_grad():  # No need to track gradients during validation
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            # Check if any returned data is None, and skip if so
             if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-                print(f"Skipping batch {batch_idx} due to missing data.")
-                continue  # Skip this batch
-
-            # Move the data to the specified device (GPU/CPU)
+                continue
+            # Move data to the device
             corr = corr.to(device)
             labels = labels.to(device)
             xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
             feat_0, feat_1 = src_features.to(device), tgt_features.to(device)
             gt_pose = gt_pose.to(device)
-    
-            # Initialize KNN graphs for source and target point clouds
-            k = 12
-            ####### remove the batch size when it is one ##############
-            # Squeeze the first dimension if it's 1 (e.g., torch.Size([1, 2048, 3]) -> torch.Size([2048, 3]))
-            if xyz_0.dim() == 3 and xyz_0.size(0) == 1:
-                xyz_0 = xyz_0.squeeze(0)
-            if xyz_1.dim() == 3 and xyz_1.size(0) == 1:
-                xyz_1 = xyz_1.squeeze(0)
-            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
-                gt_pose = gt_pose.squeeze(0)
-            if corr.dim() == 3 and corr.size(0) == 1:
-                corr = corr.squeeze(0)
-            if labels.dim() == 3 and labels.size(0) == 1:
-                labels = labels.squeeze(0)
 
-            graph_idx_0 = knn_graph(xyz_0, k=k, loop=False)
-            graph_idx_1 = knn_graph(xyz_1, k=k, loop=False)
+            # Flatten the input points for KNN computation
+            # xyz_0_flat = xyz_0.view(-1, xyz_0.size(-1))  # Shape: [batch_size * num_points, 3]
+            # xyz_1_flat = xyz_1.view(-1, xyz_1.size(-1))
+
+            # Input: xyz_0 and xyz_1 are tensors of shape [batch_size, 2048, 3]
+            batch_size, num_points, _ = xyz_0.shape
+
+            # Generate batch indices (ensures k-NN only considers points within the same batch)
+            batch_indices = torch.arange(batch_size, device=device).repeat_interleave(num_points)  # Shape: [batch_size * num_points]
+
+            # Flatten input points for k-NN computation
+            xyz_0_flat = xyz_0.view(-1, 3)  # Shape: [batch_size * num_points, 3]
+            xyz_1_flat = xyz_1.view(-1, 3)  # Shape: [batch_size * num_points, 3]
+
+            # Compute k-NN graphs (ensuring edges are within batch instances)
+            k = 16
+            # graph_idx_0 = knn_graph(xyz_0_i, k=k, loop=False)
+            # graph_idx_1 = knn_graph(xyz_1_i, k=k, loop=False)
+
+            graph_idx_0_list = []
+            graph_idx_1_list = []
+
+            for i in range(batch_size):
+                # Compute kNN graph for each batch
+                graph_idx_0_i = knn_graph(xyz_0[i], k=k, loop=True)  # Shape: (2, num_edges)
+                graph_idx_1_i = knn_graph(xyz_1[i], k=k, loop=True)  # Shape: (2, num_edges)
+
+                graph_idx_0_list.append(graph_idx_0_i)  # Store edge indices
+                graph_idx_1_list.append(graph_idx_1_i)
+
+            # Stack to form (batch_size, 2, num_edges)
+            graph_idx_0 = torch.stack(graph_idx_0_list, dim=0)  # Shape: (batch_size, 2, num_edges)
+            graph_idx_1 = torch.stack(graph_idx_1_list, dim=0)  # Shape: (batch_size, 2, num_edges)
+
+            # # Debugging: Check graph indices
+            # print(f"graph_idx_0 shape: {graph_idx_0.shape}")  # Expected: (2, batch_size * num_points * k)
+            # print(f"graph_idx_1 shape: {graph_idx_1.shape}")  # Expected: (2, batch_size * num_points * k)
+
+            # Ensure edges are contained within each batch
+            src, dst = graph_idx_0[:, 0], graph_idx_0[:, 1]
+            src_batch = batch_indices[src]  # Batch indices for source nodes
+            dst_batch = batch_indices[dst]  # Batch indices for target nodes
+            cross_batch_edges = (src_batch != dst_batch).sum().item()
+            print(f"[DEBUG] Cross-batch edges (should be 0): {cross_batch_edges}")
+
+            # If there are cross-batch edges, raise an error
+            if cross_batch_edges > 0:
+                raise ValueError("Cross-batch edges detected. Ensure `batch_indices` is correct and `knn_graph` respects batch boundaries.")
 
 
-            # Descriptor generation using PointNet or directly using feat_0/feat_1
+            # If using PointNet, encode the features
             if use_pointnet:
-                feature_encoder = PointNet().to(device)
-                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # else:
-            #     feat_0 = feat_0  # Use pre-computed features directly
-            #     feat_1 = feat_1  # Use pre-computed features directly
+                # Use the updated PointNet model
+                pointnet = PointNet(in_num_feature=3, hidden_num_feature=32, output_num_feature=32, device=xyz_0.device).to(device)
 
-            if feat_0.dim() == 3 and feat_0.size(0) == 1:
-                feat_0 = feat_0.squeeze(0)
-            if feat_1.dim() == 3 and feat_1.size(0) == 1:
-                feat_1 = feat_1.squeeze(0)
+                # Compute features
+                feat_0 = pointnet(xyz_0_flat, graph_idx_0, batch_indices).view(batch_size, num_points, -1)  # [batch_size, 2048, 32]
+                feat_1 = pointnet(xyz_1_flat, graph_idx_1, batch_indices).view(batch_size, num_points, -1)  # [batch_size, 2048, 32]
 
-            # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
-            # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
-            # Initialize edges and edge attributes for source and target
-            edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
-            edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
+                # feature_encoder = PointNet().to(device)
+                # feat_0 = feature_encoder(xyz_0, graph_idx_0, None)
+                # feat_1 = feature_encoder(xyz_1, graph_idx_1, None)
+            # Reshape to batch-first format
+            graph_idx_0 = graph_idx_0.view(batch_size, 2, k*num_points) #.transpose(0, 1)  # Shape: (batch_size, 2, num_edges_per_batch)
+            graph_idx_1 = graph_idx_1.view(batch_size, 2, k*num_points) #.transpose(0, 1)  # Shape: (batch_size, 2, num_edges_per_batch)
 
-            # # Forward pass through the model
-            rot_mat, translation, corr_loss, ssim_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels, gt_pose)
-            #corr_loss
+            edges_0 = None
+            edge_attr_0 = None
+            edges_1 = None
+            edge_attr_1 = None
+
+            # Initialize lists to store the results
+            edges_0_list, edge_attr_0_list = [], []
+            edges_1_list, edge_attr_1_list = [], []
+
+            # Loop through each batch
+            batch_size = xyz_0.size(0)  # Get batch size
+
+            for i in range(batch_size):
+                # Extract the i-th batch
+                graph_idx_0_i = graph_idx_0[i]  # Shape: [2, 32768]
+                graph_idx_1_i = graph_idx_1[i]  # Shape: [2, 32768]
+                xyz_0_i = xyz_0[i]  # Shape: [2048, 3]
+                xyz_1_i = xyz_1[i]  # Shape: [2048, 3]
+                
+                # # Debug prints
+                # print(f"Batch {i}:")
+                # print(f"graph_idx_0_i shape: {graph_idx_0_i.shape}")
+                # print(f"xyz_0_i shape: {xyz_0_i.shape}")
+                
+                # Call get_edges_batch for the i-th batch
+                edges_0_i, edge_attr_0_i = get_edges_batch(graph_idx_0_i, xyz_0_i.size(0), 1)
+                edges_1_i, edge_attr_1_i = get_edges_batch(graph_idx_1_i, xyz_1_i.size(0), 1)
+
+                # Stack edges correctly: Convert list [row_tensor, col_tensor] → single tensor of shape (2, N)
+                edges_0_i = torch.stack(edges_0_i, dim=0)  # Shape: (2, N)
+                edges_1_i = torch.stack(edges_1_i, dim=0)  # Shape: (2, N)
+
+                # Store in lists
+                edges_0_list.append(edges_0_i)  # Shape: (2, N)
+                edge_attr_0_list.append(edge_attr_0_i)  # Shape: (N, 1)
+                edges_1_list.append(edges_1_i)  # Shape: (2, N)
+                edge_attr_1_list.append(edge_attr_1_i)  # Shape: (N, 1)
+
+            # Stack across the batch dimension
+            edges_0 = torch.stack(edges_0_list, dim=0)  # Shape: (batch_size, 2, N)
+            edge_attr_0 = torch.stack(edge_attr_0_list, dim=0)  # Shape: (batch_size, N, 1)
+            edges_1 = torch.stack(edges_1_list, dim=0)  # Shape: (batch_size, 2, N)
+            edge_attr_1 = torch.stack(edge_attr_1_list, dim=0)  # Shape: (batch_size, N, 1)
+
+            # Forward pass through the model
+            rot_mat, translation, scores, ssim_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels, gt_pose)
+
             # Predicted pose as a transformation matrix
             # pred_pose = quat_to_mat(np.hstack((quaternion.cpu().numpy(), translation.cpu().numpy())))
             transformation_matrix = np.eye(4)
             # Assign rotation and translation
-            transformation_matrix[:3, :3] = rot_mat
-            transformation_matrix[:3, 3] = translation
+            transformation_matrix[:3, :3] = rot_mat.cpu().numpy()
+            transformation_matrix[:3, 3] = translation.cpu().numpy()
 
-            # Compute evaluation metrics
-            rot_err, trans_err = calculate_pose_error(gt_pose.cpu().numpy(), transformation_matrix)
-            print("$$$$$$ ######### $$$$$")
-            print(transformation_matrix.shape)
-            print(src_pts.shape)
+
             # Ensure points are 2048 x 3 by removing the batch dimension
             if src_pts.dim() == 3 and src_pts.size(0) == 1:
                 src_pts = src_pts.squeeze(0)
             if tar_pts.dim() == 3 and tar_pts.size(0) == 1:
                 tar_pts = tar_pts.squeeze(0)
+            if gt_pose.dim() == 3 and gt_pose.size(0) == 1:
+                gt_pose = gt_pose.squeeze(0)
+  
+            # Compute evaluation metrics
+            rot_err, trans_err = calculate_pose_error(gt_pose.cpu().numpy(), transformation_matrix)
+
 
             # Convert to homogeneous coordinates
             src_pts_homogeneous = np.hstack((src_pts.cpu().numpy(), np.ones((src_pts.shape[0], 1))))
             tar_pts_homogeneous = np.hstack((tar_pts.cpu().numpy(), np.ones((tar_pts.shape[0], 1))))
 
             # Call the registration_recall function with properly formatted inputs
-            recall, point_precision = registration_recall(gt_pose.cpu().numpy(), pred_pose, src_pts_homogeneous, tar_pts_homogeneous)
+            recall, point_precision = registration_recall(gt_pose.cpu().numpy(), transformation_matrix, src_pts.cpu().numpy(), tar_pts.cpu().numpy())
 
             # Update metrics
             rotation_errors.append(rot_err)
             translation_errors.append(trans_err)
             recalls.append(recall)
 
-            precisions.append(recall)
             f1_score = 2 * (point_precision * recall) / (point_precision + recall + 1e-6)
             f1_scores.append(f1_score)
 
             # Print metrics for current batch
             print(f"Batch {batch_idx}: Rot Err: {rot_err:.4f}, Trans Err: {trans_err:.4f}, Recall: {recall:.4f}, F1: {f1_score:.4f}")
 
+    print(f"Average Rotation Error {np.mean(rotation_errors)}: Average Translation Error: {np.mean(translation_errors)}, Avg Recall: {np.mean(recalls)}, Avg F1: {np.mean(f1_scores)}")
+
     # Compute average metrics
     avg_metrics = {
         "Average Rotation Error": np.mean(rotation_errors),
         "Average Translation Error": np.mean(translation_errors),
         "Average Recall": np.mean(recalls),
-        "Average Precision": np.mean(precisions),
         "Average F1 Score": np.mean(f1_scores),
     }
 
@@ -1172,20 +1274,20 @@ def get_args():
     parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
     
     # Add arguments with default values
-    parser.add_argument('--base_dir', type=str, default='/home/eavise3d/3DMatch_FCGF_Feature_32_transform', help='Path to the dataset')
+    parser.add_argument('--base_dir', type=str, default='/media/eavise3d/新加卷/Datasets/eccv-data-0126/3DMatch/3DMatch_fcgf_feature_test', help='Path to the dataset')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--learning_rate', type=float, default=2e-5, help='Learning rate for the optimizer')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
-    parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
+    parser.add_argument('--k', type=int, default=16, help='Number of nearest neighbors in KNN graph')
     parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
-    parser.add_argument('--hidden_node_nf', type=int, default=64, help='Hidden node feature size for EGNN')
-    parser.add_argument('--sim_hidden_nf', type=int, default=35, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--hidden_node_nf', type=int, default=32, help='Hidden node feature size for EGNN') ### fpfh 33 fcgf 32
+    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
     parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
-    parser.add_argument('--n_layers', type=int, default=5, help='Number of layers in EGNN')
+    parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
-    parser.add_argument('--lossBeta', type=float, default=0.1, help='Correspondence loss weights')
-    parser.add_argument('--savepath', type=str, default='./checkpoints/model_checkpoint.pth', help='Path to the dataset')
+    parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
+    parser.add_argument('--savepath', type=str, default='./checkpoints/checkpoint-3dmatch.pth', help='Path to the dataset')
 
     return parser.parse_args()
 
@@ -1246,6 +1348,6 @@ if __name__ == "__main__":
     cross_attention_model.to(dev)
 
     if mode == "test":
-        checkpoint_path = "./checkpoints/model_epoch_1.pth" #####specify the right path of the saved checkpint#######
+        checkpoint_path = savepath #####specify the right path of the saved checkpint#######
         savedir = "./output/"
         avg_metric_results = evaluate_model(checkpoint_path, savedir, cross_attention_model, test_loader, device=dev, use_pointnet=False)

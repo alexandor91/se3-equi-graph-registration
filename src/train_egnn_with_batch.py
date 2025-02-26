@@ -78,6 +78,7 @@ class PointNet(nn.Module):
 
     def forward(self, pos: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         # Perform two layers of message passing
+        print("##############")
         h = self.conv1(h=pos, pos=pos, edge_index=edge_index)
         h = h.relu()
         h = self.conv2(h=h, pos=pos, edge_index=edge_index)
@@ -172,7 +173,7 @@ def compute_edge_features(coord, edge_index):
 
 # Updated Edge Model with Richer Features
 class E_GCL(nn.Module):
-    def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, num_heads=4,
+    def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, num_heads=1,
                  act_fn=nn.SiLU(), residual=True, attention=False, normalize=False, tanh=False, device='cuda:0'):
         super(E_GCL, self).__init__()
         self.residual = residual
@@ -658,12 +659,12 @@ class CrossAttentionPoseRegression(nn.Module):
         B, N, _ = x_src.shape
         # Row-wise dot product between h_src and h_tgt (resulting in B x N x 1)
         similarity_scores = torch.sum(h_src * h_tgt, dim=-1, keepdim=True)  # [B, N, 1]
-
+        top_k = 2048
         # Get top-k scores and indices (k=128)
-        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=128, dim=-1)  # [B, 128]
+        top_scores, top_indices = torch.topk(similarity_scores.squeeze(-1), k=top_k, dim=-1)  # [B, 128]
 
         # Gather top-k features and corresponding point coordinates
-        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, 128)
+        batch_indices = torch.arange(batch_size, device=device).view(-1, 1).expand(-1, top_k)
         compressed_h_src = torch.gather(h_src, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
         compressed_h_tgt = torch.gather(h_tgt, dim=1, index=top_indices.unsqueeze(-1).expand(-1, -1, feature_dim))  # [B, 128, 32]
 
@@ -1061,7 +1062,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         # Forward pass through the model
         rot_mat, translation, corr_loss, ssim_loss, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels, gt_pose)
 
-        point_error, feature_loss = compute_losses(rot_mat, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
+        point_errors, feature_loss = compute_losses(rot_mat, translation, h_src_norm, x_src, h_tgt_norm, x_tgt, gt_labels)
         
         # Compute pose loss
         rot_losses, trans_losses = pose_loss(rot_mat, translation, gt_pose, delta=1.5)
@@ -1079,6 +1080,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         trans_loss_mean = trans_losses.mean()  # Normalize translation loss across the batch
         corr_loss_mean = corr_loss.mean()
         ssim_loss_mean = ssim_loss.mean()
+        point_error = point_errors.mean()
         print("Avg rot, trans, point errors below!")
         print(rot_loss_mean)
         print(trans_loss_mean)
@@ -1505,16 +1507,16 @@ def get_args():
     parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
     
     # Add arguments with default values
-    parser.add_argument('--base_dir', type=str, default="/media/eavise3d/新加卷/Datasets/luan-scripts/3DMatch/3DMatch", help='Path to the dataset')  ### /home/eavise3d/Downloads/3DMatch_FPFH_Feature
+    parser.add_argument('--base_dir', type=str, default="/media/eavise3d/新加卷/Datasets/eccv-data-0126/kitti/kitti/dataset", help='Path to the dataset')  ### "/media/eavise3d/新加卷/Datasets/luan-scripts/3DMatch/3DMatch"
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate for the optimizer')
-    parser.add_argument('--num_epochs', type=int, default=500, help='Number of epochs for training')
+    parser.add_argument('--num_epochs', type=int, default=200, help='Number of epochs for training')
     parser.add_argument('--num_node', type=int, default=2048, help='Number of nodes in the graph')
     parser.add_argument('--k', type=int, default=12, help='Number of nearest neighbors in KNN graph')
-    parser.add_argument('--in_node_nf', type=int, default=32, help='Input feature size for EGNN')
-    parser.add_argument('--hidden_node_nf', type=int, default=32, help='Hidden node feature size for EGNN') ### fpfh 33 fcgf 32
-    parser.add_argument('--sim_hidden_nf', type=int, default=32, help='Hidden dimension after concatenation in EGNN')
-    parser.add_argument('--out_node_nf', type=int, default=32, help='Output node feature size for EGNN')
+    parser.add_argument('--in_node_nf', type=int, default=33, help='Input feature size for EGNN')
+    parser.add_argument('--hidden_node_nf', type=int, default=33, help='Hidden node feature size for EGNN') ### fpfh 33 fcgf 32
+    parser.add_argument('--sim_hidden_nf', type=int, default=33, help='Hidden dimension after concatenation in EGNN')
+    parser.add_argument('--out_node_nf', type=int, default=33, help='Output node feature size for EGNN')
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
     parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
@@ -1546,7 +1548,7 @@ if __name__ == "__main__":
     savepath = args.savepath
 
     mode = "train" ### set to "eval" for inference mode
-    train_dataset = ThreeDMatchTrainVal(root=base_dir, 
+    train_dataset = KITTItrainVal(root=base_dir,   ####  ThreeDMatchTrainVal
                             split=mode,   
                             descriptor='fpfh',
                             in_dim=6,
@@ -1559,7 +1561,7 @@ if __name__ == "__main__":
                             augment_translation=0.01,
                         )
 
-    val_dataset = ThreeDMatchTrainVal(root=base_dir, 
+    val_dataset = KITTItrainVal(root=base_dir,    ### ThreeDMatchTrainVal
                             split='val',   
                             descriptor='fpfh',
                             in_dim=6,
@@ -1572,7 +1574,7 @@ if __name__ == "__main__":
                             augment_translation=0.01,
                         )
 
-    test_dataset = ThreeDMatchTest(root=base_dir, 
+    test_dataset =  KITTItest(root=base_dir,      ###  ThreeDMatchTest
                             split='test',   
                             descriptor='fpfh',
                             in_dim=6,
@@ -1614,4 +1616,4 @@ if __name__ == "__main__":
                 learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
         checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
-        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)
+        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=True)

@@ -332,7 +332,7 @@ class EGNN(nn.Module):
         h = self.embedding_in(h)
         for i in range(0, self.n_layers):
             h, x, _ = self._modules["gcl_%d" % i](h, edges, x, edge_attr=edge_attr)
-        # alpha = torch.sigmoid(self.embedding_out(h))  # Learnable gating
+        # alpha = torch.sigmoid(self.embedding_out(h).mean(dim=-1, keepdim=True))  # Shape: (batch_size, N, 1)
         # h = h_org * (1 - alpha) + h * alpha
         h = self.embedding_out(h)
         # x = x_org + torch.tanh(x)  # Prevents large jumps in coordinate updates        
@@ -774,6 +774,9 @@ class CrossAttentionPoseRegression(nn.Module):
         # Define loss function (MSE Loss)
         criterion2 = torch.nn.MSELoss()
 
+        similarity_scores = (similarity_scores - similarity_scores.mean()) / (similarity_scores.std() + 1e-6)
+        raw_similarity_scores = (raw_similarity_scores - raw_similarity_scores.mean()) / (raw_similarity_scores.std() + 1e-6)
+
         # Compute similarity loss
         sim_loss = criterion2(similarity_scores, raw_similarity_scores)
 
@@ -1106,13 +1109,15 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         trans_loss_mean = trans_losses.mean()  # Normalize translation loss across the batch
         corr_loss_mean = corr_loss.mean()
         ssim_loss_mean = ssim_loss.mean()
-        print("Avg rot, trans, point errors below!")
+        point_error_mean = point_error.mean()
+        print("Test 2: Avg rot, trans, point errors below!")
         print(rot_loss_mean)
         print(trans_loss_mean)
-        print(point_error)
+        print(corr_loss_mean)
         print(ssim_loss_mean)
+        print(point_error_mean)
         # Combine the normalized losses if needed
-        total_loss = corr_loss_mean + ssim_loss_mean
+        total_loss = corr_loss_mean #  + ssim_loss_mean
 
         # Combine pose and correspondence losses
         loss = total_loss #+ beta * corr_loss
@@ -1545,7 +1550,7 @@ def get_args():
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
     parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
-    parser.add_argument('--savepath', type=str, default='./checkpoints/sim-residual-loss-2025-01-24-checkpoints', help='Path to the dataset')
+    parser.add_argument('--savepath', type=str, default='./checkpoints/sim-egnn-loss-2025-01-26-checkpoints', help='Path to the dataset')
 
     return parser.parse_args()
 

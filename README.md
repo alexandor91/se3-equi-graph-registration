@@ -27,48 +27,62 @@ To set up the environment for this project, we use Conda. Follow these steps:
 $conda env create -f environment.yml
 $conda activate egnn-test
 
-## Data
+## Raw Data download
 
-To run this project, you'll need to download the following pre-processed datasets in our self-defined format:
+1. To run this project, you'll need to download the following raw data for next step processing:
 
-- [3DMatch](https://drive.google.com/file/d/1wr21qFPvgoDWsBnMafew7h-vZfP242Gw/view?usp=drive_link)
+- [3DMatch](https://drive.google.com/file/d/1b8yA9AqJ0iBTfn9dhrK84JLG3CMGQRF3/view)
 - [KITTI](https://drive.google.com/file/d/17u2AWfPIMbgCQUVtXYelgacv_Cyeh6EM/view?usp=sharing)
 
-## Data Processing
+2. After uncompression, you should have seen 'fragments', 'gt_results', under root dir of the data folder,
 
-For the two dataloaders of datasets, we provide dataloader scripts in the `datasets` folder:
+3. Download 3DMatch raw fragments from the [PointDSC](http://node2.chrischoy.org/data/datasets/registration/threedmatch.tgz) repository, uncompress 'threedmatch.tgz', and copy it into the same data folder level with 'fragments'. To run processing script 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
 
-- `3DMatch.py`: For processing 3DMatch dataset
-- `KITTI.py`: For processing KITTI dataset
+4. Copy `3DMatch_Feature.py` from `data_preprocess` folder into the data root dir, run '`data_preprocess` folder' to process, after run, all data pairs are saved in each pkl file
+
+5. Use 'split_dataset_train_val' from 'datasets' folder to split train, val, and create test filelist txt files, put txt at level of  pkl data folder (not inside folder with pkl!). change data [ath in training code.
+
+## Data Processing for pair pkl files
+ 
+For the training dataset processing, we provide scripts in the `data_preprocess` folder:
+
+- `3DMatch_Feature.py`: For processing 3DMatch data, configure the directory based on the commend in the function
+- `process_kitti.py`: For processing KITTI dataset, configure the directory based on the commend in the function
 
 ## Custom Data Processing
 For self-processing data, please check the scripts in 'data_preprocess' folder for each individual training data processing:
 If you own dataset is ordered sequence point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $i$ th and $i+1$ th frame respectively.
-- `process_KITTI_Feature.py`: For processing sequential dataset.<br> 
+- `process_kitti.py`: For processing sequential dataset.<br> 
 
 For processing KITTI dataset. Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
 
-- `process_3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%. We use too conditions to determined the gt correspondence from source to target points, the transformed source point position distance to the target point is smaller than a threshold along with the point feature descriptors dot product similairty bigger than a threshold, label as one, otherwise, we only use point neighbouring search to find the match point pair, label as zero, 
+- `3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%. We use too conditions to determined the gt correspondence from source to target points, the transformed source point position distance to the target point is smaller than a threshold along with the point feature descriptors dot product similairty bigger than a threshold, label as one, otherwise, we only use point neighbouring search to find the match point pair, label as zero, 
 
 ## Training
 
-To train the EGNN model, run the following script `train_egnn.py` in the `src` folder:
-$python src/train_eval_egnn.py
+To train the EGNN model, run the following script `3dmatch_train_egnn_with_batch.py` in the `src` folder for training of 3DMatch, batch size recommended no larger than 16:
+$python src/3dmatch_train_egnn_with_batch.py
+
+to train on kitti, run:
+$python src/kitti_train_egnn_with_batch.py
 
 One more thing to the training of custom dataset training, you can set "use_pointnet"  flag in the train model code to true, so that the model will train the model in end2end way from input point cloud scan pair to feature descriptor extraction, and until to equi-gnn regression, as custom dataset scenes may have some gap to indoor 3D Match or KITTI outdoor datasets. But indeed some more training time and tuning of layer hyper-params may be needed for this end2end training, and we also recommend you to use pre-trained  [PointTransformerV2](https://github.com/Pointcept/PointTransformerV2), [PointTransformerV3](https://github.com/Pointcept/PointTransformerV3), the point transformer can be used as encoder for point feature descriptor extraction, to replace pointnet encoder in the code. By using the pre-trained -point transformer encoder weights fine-tuned on custom dataset you can mitigate the data gap, and it helps to converge fast based on our recent tests.
 
 tensorboard logs are exported under "./runs" directory relative to the run script.
 
 ## Evaluation
+Put the saved best checkpoint into the 'src/checkpoints' folder,
 
-In same train_eval_egnn.py, set the "mode" variable in the main function to "test" mode, then run it to load the test data for evaluation.
+Use 'eval_egnn_metrics', set the "checkpointpath" variable in the main function to the specific checkpoint path you put, then run it to load the test data for evaluation.
 
-For metric results generation, use the `evaluation.py` script located in the `tools` folder to load the saved results of model output in inference model and compared the results under a specified directorh against another directory of gt poses:
-$python tools/evaluation_metrics.py
+$python src/eval_egnn_metrics.py
+
+Average metric results data save in txt file and printed on the terminal where it is run.
+The metric reuslts may ahve a bit fluctuation but around 1.4 degree for avg rotation error, and 4.5 cm for translation error. 
 
 ## Citation
 
-If you find our work useful in your research, please consider citing:
+If you find our work useful in your research, please kindly consider adding the following citation:
 
 ```bibtex
 @inproceedings{kang2025equi,

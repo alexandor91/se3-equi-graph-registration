@@ -78,7 +78,6 @@ class PointNet(nn.Module):
 
     def forward(self, pos: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         # Perform two layers of message passing
-        print("##############")
         h = self.conv1(h=pos, pos=pos, edge_index=edge_index)
         h = h.relu()
         h = self.conv2(h=h, pos=pos, edge_index=edge_index)

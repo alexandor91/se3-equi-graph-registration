@@ -43,6 +43,7 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 # Add the project root to the Python path
 sys.path.insert(0, project_root)
 
+from tools.evaluation_metrics import calculate_pose_error, registration_recall  #####, evaluate_pairwise_frames
 # Now you can import from datasets
 from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
@@ -1388,7 +1389,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
             checkpoint_path = save_path  #"./checkpoints"
             save_checkpoint(epoch + 1, pointnet, egnn, cross_attention, optimizer, checkpoint_path, use_pointnet=use_pointnet)
 
-def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=False):
+def evaluate_model(checkpoint_path, save_dir, model, dataloader, device, use_pointnet=False):
     """
     Evaluate the model using a saved checkpoint, and print the predicted pose as a homogeneous transform matrix.
 
@@ -1402,6 +1403,7 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
     Returns:
         float: The average loss over the evaluation dataset.
     """
+    os.makedirs(save_dir, exist_ok=True)    
     # Load the checkpoint and restore the model's weights
     egnn = model.egnn
     cross_attention = model  # CrossAttentionPoseRegression is the top-level model
@@ -1418,19 +1420,20 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
 
     # Set the model to evaluation mode
     model.eval()
+    running_loss = 0.0  # Track overall loss
+    running_corr_loss = 0.0  # Track correspondence rank loss
+    running_pose_loss = 0.0  # Track pose loss
+    # Initialize metric accumulators
+    rotation_errors, translation_errors, recalls, precisions, f1_scores = [], [], [], [], []
 
-    total_loss = 0.0
-    total_pose_loss = 0.0
-    total_corr_loss = 0.0
-    num_batches = 0
-
-    with torch.no_grad():  # Disable gradient calculation for evaluation
+    with torch.no_grad():  # No need to track gradients during validation
         for batch_idx, (corr, labels, src_pts, tar_pts, src_features, tgt_features, gt_pose) in enumerate(dataloader):
-            # Skip batches with missing data
+            # Check if any returned data is None, and skip if so
             if corr is None or labels is None or src_pts is None or tar_pts is None or src_features is None or tgt_features is None or gt_pose is None:
-                continue
+                print(f"Skipping batch {batch_idx} due to missing data.")
+                continue  # Skip this batch
 
-            # Move data to the device
+            # Move the data to the specified device (GPU/CPU)
             corr = corr.to(device)
             labels = labels.to(device)
             xyz_0, xyz_1 = src_pts.to(device), tar_pts.to(device)
@@ -1456,46 +1459,64 @@ def evaluate_model(checkpoint_path, model, dataloader, device, use_pointnet=Fals
                 
             # Descriptor generation using PointNet or pre-computed features
             if use_pointnet:
-                feat_0 = pointnet(xyz_0, graph_idx_0, None)
-                feat_1 = pointnet(xyz_1, graph_idx_1, None)
+                feature_encoder = PointNet().to(device)
+                feat_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
+                feat_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
+            # else:
+            #     feat_0 = feat_0  # Use pre-computed features directly
+            #     feat_1 = feat_1  # Use pre-computed features directly
 
-            # Get edges and edge attributes
+            if feat_0.dim() == 3 and feat_0.size(0) == 1:
+                feat_0 = feat_0.squeeze(0)
+            if feat_1.dim() == 3 and feat_1.size(0) == 1:
+                feat_1 = feat_1.squeeze(0)
+
+            # feats_0 = feature_encoder(xyz_0, graph_idx_0, None)  # Descriptor for source
+            # feats_1 = feature_encoder(xyz_1, graph_idx_1, None)  # Descriptor for target
+            # Initialize edges and edge attributes for source and target
             edges_0, edge_attr_0 = get_edges_batch(graph_idx_0, xyz_0.size(0), 1)
             edges_1, edge_attr_1 = get_edges_batch(graph_idx_1, xyz_1.size(0), 1)
 
-            # Forward pass through the model (no backprop in evaluation)
+            # # Forward pass through the model
             quaternion, translation, corr_loss = model(feat_0, xyz_0, edges_0, edge_attr_0, feat_1, xyz_1, edges_1, edge_attr_1, corr, labels)
+            #corr_loss
+            # Predicted pose as a transformation matrix
+            pred_pose = quaternion_to_matrix(np.hstack((quaternion.cpu().numpy(), translation.cpu().numpy())))
 
-            # Convert quaternion and translation to a homogeneous transform matrix
-            for i in range(quaternion.size(0)):  # Process each batch item
-                rot_matrix = quaternion_to_matrix(quaternion[i], device=device)  # Ensure quaternion to matrix is on the correct device
-                trans_vector = translation[i]
+            # Compute evaluation metrics
+            rot_err, trans_err = calculate_pose_error(gt_pose.cpu().numpy(), pred_pose)
+            recall = registration_recall(gt_pose.cpu().numpy(), pred_pose, src_pts.cpu().numpy(), tar_pts.cpu().numpy())
 
-                # Create a 4x4 homogeneous transformation matrix
-                hom_matrix = torch.eye(4, device=device)  # Create on device
-                hom_matrix[:3, :3] = rot_matrix
-                hom_matrix[:3, 3] = trans_vector
+            # Update metrics
+            rotation_errors.append(rot_err)
+            translation_errors.append(trans_err)
+            recalls.append(recall)
 
-                print(f"Predicted Pose (Batch {batch_idx}, Item {i}):")
-                print(hom_matrix)
+            precision = recall  # Placeholder
+            precisions.append(precision)
+            f1_score = 2 * (precision * recall) / (precision + recall + 1e-6)
+            f1_scores.append(f1_score)
 
-            # Compute pose loss
-            pose_losses = pose_loss(quaternion, translation, gt_pose, delta=1.5)
+            # Print metrics for current batch
+            print(f"Batch {batch_idx}: Rot Err: {rot_err:.4f}, Trans Err: {trans_err:.4f}, Recall: {recall:.4f}, F1: {f1_score:.4f}")
 
-            # Combine pose and correspondence losses
-            loss = pose_losses + corr_loss
-            total_loss += loss.item()
-            total_pose_loss += pose_losses.item()
-            total_corr_loss += corr_loss.item()
-            num_batches += 1
+    # Compute average metrics
+    avg_metrics = {
+        "Average Rotation Error": np.mean(rotation_errors),
+        "Average Translation Error": np.mean(translation_errors),
+        "Average Recall": np.mean(recalls),
+        "Average Precision": np.mean(precisions),
+        "Average F1 Score": np.mean(f1_scores),
+    }
 
-    # Calculate average losses
-    avg_loss = total_loss / num_batches
-    avg_pose_loss = total_pose_loss / num_batches
-    avg_corr_loss = total_corr_loss / num_batches
+    # Save metrics to file
+    with open(os.path.join(save_dir, "evaluation_results.txt"), "w") as result_file:
+        for metric, value in avg_metrics.items():
+            result_file.write(f"{metric}: {value:.4f}\n")
 
-    print(f"Evaluation completed. Avg Loss: {avg_loss:.6f}, Avg Pose Loss: {avg_pose_loss:.6f}, Avg Corr Loss: {avg_corr_loss:.6f}")
-    return avg_loss, avg_pose_loss, avg_corr_loss
+    print("Evaluation completed. Metrics saved.")
+
+    return avg_metrics
 
 def get_args():
     parser = argparse.ArgumentParser(description="Training a Pose Regression Model")
@@ -1594,7 +1615,7 @@ if __name__ == "__main__":
     if mode == "train":
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    elif mode == "eval":
+    elif mode == "test":
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     egnn = EGNN(in_node_nf=in_node_nf, hidden_nf=hidden_node_nf, out_node_nf=out_node_nf, in_edge_nf=1, n_layers=n_layers)
@@ -1610,5 +1631,6 @@ if __name__ == "__main__":
         train_model(cross_attention_model, train_loader, val_loader, num_epochs=num_epochs, \
                 learning_rate=learning_rate, device=dev, writer=writer, use_pointnet=False, log_interval=10, beta=0.1, save_path=savepath)
     elif mode == "test":
-        checkpoint_path = "./checkpoints/model_epoch_16.pth" #####specify the right path of the saved checkpint#######
-        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, cross_attention_model, val_loader, device=dev, use_pointnet=False)
+        checkpoint_path = "./checkpoints/model_epoch_1.pth" #####specify the right path of the saved checkpint#######
+        savedir = "./output/"
+        avg_loss, avg_pose_loss, avg_corr_loss = evaluate_model(checkpoint_path, savedir, cross_attention_model, test_loader, device=dev, use_pointnet=False)

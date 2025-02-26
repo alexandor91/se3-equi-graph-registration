@@ -23,8 +23,13 @@ def calculate_pose_error(gt_pose, pred_pose):
 
     return rotation_error, translation_error
 
+<<<<<<< HEAD
 def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.15):
     """Calculate the registration recall."""
+=======
+def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.09):
+    """Calculate the registration recall based on the equation in the provided image."""
+>>>>>>> 2a357122e30aab6fa1881427d94545722bf9864c
     # Apply the predicted transformation to the source points
     src_transformed = (pred_pose @ src_pts.T).T  # 4x4 transformation applied to 4xN points
 
@@ -34,13 +39,21 @@ def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.15):
     # Compute the Euclidean distance between transformed source and target points
     distances = np.linalg.norm(src_transformed - tgt_pts[:, :3], axis=1)
 
-    # Count how many points are below the threshold tau
-    valid_count = np.sum(distances < tau)
+    # Count True Positive Matches (below threshold tau)
+    true_positives = np.sum(distances < tau)
 
+<<<<<<< HEAD
     # Compute the recall
     recall = valid_count / len(src_pts)
+=======
+    # Recall: sqrt(TP / Total ground truth points)
+    recall = np.sqrt(true_positives / len(src_pts))
+>>>>>>> 2a357122e30aab6fa1881427d94545722bf9864c
 
-    return recall
+    # Precision: TP / Total predicted points (source transformed points)
+    precision = true_positives / len(src_transformed) if len(src_transformed) > 0 else 0.0
+
+    return recall, precision
 
 def evaluate_pairwise_frames(gt_file_list, pred_file_list, gt_dir, pred_dir, save_dir):
     assert len(gt_file_list) == len(pred_file_list), "Ground truth and prediction file lists must have the same length."
@@ -115,7 +128,11 @@ def evaluate_pairwise_frames(gt_file_list, pred_file_list, gt_dir, pred_dir, sav
         summary_file.write(f"Average Registration Recall: {avg_recall:.4f}\n")
         summary_file.write(f"Average F1 Score: {avg_f1_score:.4f}\n")
 
+<<<<<<< HEAD
 # Example usage:
+=======
+# # Example usage:
+>>>>>>> 2a357122e30aab6fa1881427d94545722bf9864c
 # gt_file_list = ["0001.pkl", "0002.pkl", "0003.pkl"]  # List of ground truth files
 # pred_file_list = ["0001.txt", "0002.txt", "0003.txt"]  # List of prediction files
 

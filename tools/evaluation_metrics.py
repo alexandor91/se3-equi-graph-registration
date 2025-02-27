@@ -1,9 +1,9 @@
+import numpy as np
 import os
 import pickle
-import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-def quat_to_mat(q):
+def quaternion_to_matrix(q):
     """Convert quaternion to a 4x4 transformation matrix."""
     rot = R.from_quat(q[:4])
     matrix = np.eye(4)
@@ -26,17 +26,13 @@ def calculate_pose_error(gt_pose, pred_pose):
 def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.09):
     """Calculate the registration recall based on the equation in the provided image."""
     # Apply the predicted transformation to the source points
-    src_transformed = (pred_pose @ src_pts.T).T  # 4x4 transformation applied to 4xN points
-
-    # Drop the homogeneous coordinate
-    src_transformed = src_transformed[:, :3]
+    src_transformed = (pred_pose[:3, :3] @ src_pts.T).T + pred_pose[:3, 3]
 
     # Compute the Euclidean distance between transformed source and target points
-    distances = np.linalg.norm(src_transformed - tgt_pts[:, :3], axis=1)
+    distances = np.linalg.norm(src_transformed - tgt_pts, axis=1)
 
     # Count True Positive Matches (below threshold tau)
     true_positives = np.sum(distances < tau)
-
 
     # Recall: sqrt(TP / Total ground truth points)
     recall = np.sqrt(true_positives / len(src_pts))
@@ -49,75 +45,63 @@ def registration_recall(gt_pose, pred_pose, src_pts, tgt_pts, tau=0.09):
 def evaluate_pairwise_frames(gt_file_list, pred_file_list, gt_dir, pred_dir, save_dir):
     assert len(gt_file_list) == len(pred_file_list), "Ground truth and prediction file lists must have the same length."
 
-    # Initialize metric containers
     rotation_errors = []
     translation_errors = []
     recalls = []
     precisions = []
     f1_scores = []
 
-    # Create a directory to save results if it doesn't exist
-    os.makedirs(save_dir, exist_ok=True)
+    for gt_file, pred_file in zip(gt_file_list, pred_file_list):
+        gt_file_path = os.path.join(gt_dir, gt_file)
+        pred_file_path = os.path.join(pred_dir, pred_file)
 
-    # Log real-time results
-    with open(os.path.join(save_dir, "detailed_results.txt"), "w") as log_file:
-        for gt_file, pred_file in zip(gt_file_list, pred_file_list):
-            gt_file_path = os.path.join(gt_dir, gt_file)
-            pred_file_path = os.path.join(pred_dir, pred_file)
+        # Load the ground truth .pkl file containing gt_pose, src_pts, tar_pts
+        with open(gt_file_path, 'rb') as f:
+            gt_data = pickle.load(f)
 
-            # Load the ground truth .pkl file containing gt_pose, src_pts, tar_pts
-            with open(gt_file_path, 'rb') as f:
-                gt_data = pickle.load(f)
+        gt_pose = gt_data['gt_pose']  # 4x4 ground truth pose matrix
+        src_pts = gt_data['xyz_0']  # Source point cloud
+        tgt_pts = gt_data['xyz_1']  # Target point cloud
 
-            gt_pose = gt_data['gt_pose']  # 4x4 ground truth pose matrix
-            src_pts = gt_data['xyz_0']  # Source point cloud
-            tgt_pts = gt_data['xyz_1']  # Target point cloud
+        # Load predicted pose (from corresponding .txt file in pred_dir)
+        with open(pred_file_path, 'r') as pred_file:
+            pred_data = list(map(float, pred_file.readline().strip().split()))
+            pred_pose = quaternion_to_matrix(pred_data)
 
-            # Load predicted pose (from corresponding .txt file in pred_dir)
-            with open(pred_file_path, 'r') as pred_file:
-                pred_data = list(map(float, pred_file.readline().strip().split()))
-                pred_pose = quat_to_mat(pred_data)
+        # Calculate pose errors
+        rot_err, trans_err = calculate_pose_error(gt_pose, pred_pose)
+        rotation_errors.append(rot_err)
+        translation_errors.append(trans_err)
 
-            # Calculate pose errors
-            rot_err, trans_err = calculate_pose_error(gt_pose, pred_pose)
-            rotation_errors.append(rot_err)
-            translation_errors.append(trans_err)
+        # Calculate registration recall
+        recall = registration_recall(gt_pose, pred_pose, src_pts, tgt_pts)
+        recalls.append(recall)
 
-            # Calculate registration recall
-            recall = registration_recall(gt_pose, pred_pose, src_pts, tgt_pts)
-            recalls.append(recall)
+        # Calculate precision, F1 score (dummy example for now, modify based on your use case)
+        precision = np.mean([recall])  # Placeholder for precision calculation
+        precisions.append(precision)
+        f1_score = 2 * (precision * recall) / (precision + recall + 1e-6)
+        f1_scores.append(f1_score)
 
-            # Calculate precision and F1 score
-            precision = recall  # Assuming precision = recall in this simplified case
-            precisions.append(precision)
-            f1_score = 2 * (precision * recall) / (precision + recall + 1e-6)
-            f1_scores.append(f1_score)
-
-            # Log results for the current pair
-            log_file.write(f"GT File: {gt_file}, Pred File: {pred_file}\n")
-            log_file.write(f"Rotation Error: {rot_err:.4f} degrees\n")
-            log_file.write(f"Translation Error: {trans_err:.4f} cm\n")
-            log_file.write(f"Registration Recall: {recall:.4f}\n")
-            log_file.write(f"F1 Score: {f1_score:.4f}\n\n")
-
-    # Calculate mean metrics
+    # Average metrics across all pairwise frames
     avg_rot_err = np.mean(rotation_errors)
     avg_trans_err = np.mean(translation_errors)
     avg_recall = np.mean(recalls)
     avg_precision = np.mean(precisions)
     avg_f1_score = np.mean(f1_scores)
 
-    # Print and save average results
     print(f"Average Rotation Error: {avg_rot_err:.4f} degrees")
     print(f"Average Translation Error: {avg_trans_err:.4f} cm")
     print(f"Average Registration Recall: {avg_recall:.4f}")
     print(f"Average F1 Score: {avg_f1_score:.4f}")
 
-    with open(os.path.join(save_dir, "summary_results.txt"), "w") as summary_file:
-        summary_file.write(f"Average Rotation Error: {avg_rot_err:.4f} degrees\n")
-        summary_file.write(f"Average Translation Error: {avg_trans_err:.4f} cm\n")
-        summary_file.write(f"Average Registration Recall: {avg_recall:.4f}\n")
-        summary_file.write(f"Average F1 Score: {avg_f1_score:.4f}\n")
+    # Save the results (if needed)
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "evaluation_results.txt"), "w") as result_file:
+        result_file.write(f"Average Rotation Error: {avg_rot_err:.4f} degrees\n")
+        result_file.write(f"Average Translation Error: {avg_trans_err:.4f} cm\n")
+        result_file.write(f"Average Registration Recall: {avg_recall:.4f}\n")
+        result_file.write(f"Average F1 Score: {avg_f1_score:.4f}\n")
 
 # # Example usage:
 # gt_file_list = ["0001.pkl", "0002.pkl", "0003.pkl"]  # List of ground truth files

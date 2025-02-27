@@ -46,7 +46,7 @@ from tools.evaluation_metrics import calculate_pose_error, registration_recall, 
 from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
 
-# torch.cuda.manual_seed(2)
+torch.cuda.manual_seed(2)
 # Get the path to the project root directory
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -57,7 +57,7 @@ sys.path.insert(0, project_root)
 from datasets.ThreeDMatch import ThreeDMatchTrainVal, ThreeDMatchTest  # Replace with your actual class name
 from datasets.KITTI import KITTItrainVal, KITTItest  # Replace with your actual class name
 
-# torch.cuda.manual_seed(2)
+torch.cuda.manual_seed(2)
 
 class PointNetLayer(MessagePassing):
     def __init__(self, in_channels: int, out_channels: int):
@@ -693,10 +693,10 @@ class CrossAttentionPoseRegression(nn.Module):
         t = torch.zeros(B, 3, device=x_src.device)
 
         for b in range(B):  # Process each batch
-            valid_src_points = org_x_src[b]
-            valid_tgt_points = org_x_tgt[b]###############
-            # valid_src_features = org_x_src[b]
-            # valid_tgt_features = org_x_tgt[b]
+            valid_src_points = org_x_src[b][valid_mask[b]]
+            valid_tgt_points = org_x_tgt[b][valid_mask[b]]
+            valid_src_features = org_x_src[b][valid_mask[b]]
+            valid_tgt_features = org_x_tgt[b][valid_mask[b]]
 
             if valid_src_points.shape[0] == 0:  # Skip empty batches
                 R[b] = torch.eye(3, device=x_src.device)
@@ -716,7 +716,7 @@ class CrossAttentionPoseRegression(nn.Module):
             # # Pass through MLP
             pred_scores = self.mlp(concat_h).squeeze(-1)  # [B, N]
             top_k = 128
-            pred_scores = pred_scores / top_k
+
             # Compute original similarity scores before EGNN
             org_similarity_scores = torch.sum(org_h_src * org_h_tar, dim=-1, keepdim=True)  # [B, N, 1]
 
@@ -733,7 +733,6 @@ class CrossAttentionPoseRegression(nn.Module):
             org_similarity_scores_topk = torch.gather(org_similarity_scores, dim=1, index=top_indices.unsqueeze(-1))  
 
             # **Update Weights Based on Conditions**
-            print(pred_scores)
             condition1 = (pred_scores > 0.5) & (torch.abs(pred_scores - 1) < org_similarity_scores_topk)
             condition2 = (pred_scores > 0.5) & ((pred_scores - 0) < (org_similarity_scores_topk - 0))
 
@@ -1233,6 +1232,7 @@ def evaluate_model(checkpoint_path, save_dir, model, dataloader, device, use_poi
             # Compute evaluation metrics
             rot_err, trans_err = calculate_pose_error(gt_pose.cpu().numpy(), transformation_matrix)
 
+
             # Convert to homogeneous coordinates
             src_pts_homogeneous = np.hstack((src_pts.cpu().numpy(), np.ones((src_pts.shape[0], 1))))
             tar_pts_homogeneous = np.hstack((tar_pts.cpu().numpy(), np.ones((tar_pts.shape[0], 1))))
@@ -1287,7 +1287,7 @@ def get_args():
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
     parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
-    parser.add_argument('--checkpointpath', type=str, default='./checkpoints/model_epoch_3.pth', help='Path to the dataset')
+    parser.add_argument('--savepath', type=str, default='./checkpoints/checkpoint-3dmatch.pth', help='Path to the dataset')
 
     return parser.parse_args()
 
@@ -1311,7 +1311,7 @@ if __name__ == "__main__":
     n_layers = args.n_layers
     beta = args.lossBeta
     mode = args.mode
-    checkpointpath = args.checkpointpath
+    savepath = args.savepath
 
     mode = "test" ### set to "eval" for inference mode
 
@@ -1348,6 +1348,6 @@ if __name__ == "__main__":
     cross_attention_model.to(dev)
 
     if mode == "test":
-        checkpoint_path = checkpointpath #####specify the right path of the saved checkpint#######
+        checkpoint_path = savepath #####specify the right path of the saved checkpint#######
         savedir = "./output/"
         avg_metric_results = evaluate_model(checkpoint_path, savedir, cross_attention_model, test_loader, device=dev, use_pointnet=False)

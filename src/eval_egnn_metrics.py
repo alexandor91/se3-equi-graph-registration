@@ -61,37 +61,48 @@ torch.cuda.manual_seed(2)
 
 class PointNetLayer(MessagePassing):
     def __init__(self, in_channels: int, out_channels: int):
-        super().__init__(aggr='max')  # "max" aggregation
+        super().__init__(aggr='max')  # Max aggregation over neighbors
         self.mlp = nn.Sequential(
-            nn.Linear(in_channels + 3, out_channels),
+            nn.Linear(in_channels + 3, out_channels),  # Include positional information
             nn.ReLU(),
             nn.Linear(out_channels, out_channels),
         )
 
     def forward(self, h: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        # Start propagating messages
+        """ Perform message passing. """
         return self.propagate(edge_index, h=h, pos=pos)
 
     def message(self, h_j: torch.Tensor, pos_j: torch.Tensor, pos_i: torch.Tensor) -> torch.Tensor:
-        # Concatenate features with relative positional differences
-        edge_feat = torch.cat([h_j, pos_j - pos_i], dim=-1)
+        """ Construct messages using relative positional differences. """
+        edge_feat = torch.cat([h_j, pos_j - pos_i], dim=-1)  # Concatenate feature and relative position
         return self.mlp(edge_feat)
 
 
 class PointNet(nn.Module):
-    def __init__(self, in_num_feature=3, hidden_num_feature=32, output_num_feature=32, device='cuda:0'):
+    def __init__(self, in_num_feature=32, hidden_num_feature=64, output_num_feature=32, device='cuda:0'):
         super().__init__()
         self.hidden_num_feature = hidden_num_feature
         self.conv1 = PointNetLayer(in_num_feature, hidden_num_feature)
         self.conv2 = PointNetLayer(hidden_num_feature, output_num_feature)
         self.device = device
 
-    def forward(self, pos: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        # Perform two layers of message passing
-        h = self.conv1(h=pos, pos=pos, edge_index=edge_index)
+    def forward(self, pos: torch.Tensor, feats: torch.Tensor, edge_index: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pos: Tensor of shape (batch_size * N, 3) -> Point coordinates
+            feats: Tensor of shape (batch_size * N, in_num_feature) -> Point features
+            edge_index: Edge indices for graph message passing
+            batch: Tensor of shape (batch_size * N) -> Batch index of each point
+        Returns:
+            Tensor of shape (batch_size, output_num_feature) -> Global pooled feature per batch
+        """
+        h = self.conv1(h=feats, pos=pos, edge_index=edge_index)
         h = h.relu()
         h = self.conv2(h=h, pos=pos, edge_index=edge_index)
         h = h.relu()
+
+        # Global max pooling to get batch-wise features
+        h = global_max_pool(h, batch)  # Shape: (batch_size, output_num_feature)
         return h
 
 class SO3TensorProductLayer(nn.Module):
@@ -182,7 +193,7 @@ def compute_edge_features(coord, edge_index):
 
 # Updated Edge Model with Richer Features
 class E_GCL(nn.Module):
-    def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, num_heads=4,
+    def __init__(self, input_nf, output_nf, hidden_nf, edges_in_d=0, num_heads=1,
                  act_fn=nn.SiLU(), residual=True, attention=False, normalize=False, tanh=False, device='cuda:0'):
         super(E_GCL, self).__init__()
         self.residual = residual
@@ -195,7 +206,7 @@ class E_GCL(nn.Module):
         input_edge = input_nf * 2
         edge_coords_nf = 1
         so3_feat_dim = 9
-        feature_dim = input_edge + edges_in_d + edge_coords_nf + so3_feat_dim + 2  # Include distance, dot product
+        feature_dim = input_edge + edges_in_d + edge_coords_nf + so3_feat_dim + 2 # Include distance, dot product +2
 
         # Multi-Head Edge MLP
         self.edge_mlps = nn.ModuleList([
@@ -235,6 +246,7 @@ class E_GCL(nn.Module):
 
         # Combine features
         features = [source, target, radial, dist, dot_product, so3_flat]
+        # features = [source, target, radial, so3_flat]
         if edge_attr is not None:
             features.append(edge_attr)
         out = torch.cat(features, dim=1)
@@ -325,10 +337,16 @@ class EGNN(nn.Module):
 
     def forward(self, h, x, edges, edge_attr):
         # self.to(self.device)
+        h_org = h
+        x_org = x
         h = self.embedding_in(h)
         for i in range(0, self.n_layers):
             h, x, _ = self._modules["gcl_%d" % i](h, edges, x, edge_attr=edge_attr)
+        # alpha = torch.sigmoid(self.embedding_out(h).mean(dim=-1, keepdim=True))  # Shape: (batch_size, N, 1)
+        # h = h_org * (1 - alpha) + h * alpha
         h = self.embedding_out(h)
+        # x = x_org + torch.tanh(x)  # Prevents large jumps in coordinate updates        
+        # x = x_org + x  ### residual
         return h, x
 
 
@@ -573,7 +591,6 @@ def center_and_normalize(src_pts, tar_pts):
     
     return src_pts_normalized, tar_pts_normalized
 
-
 class CrossAttentionPoseRegression(nn.Module):
     def __init__(self, egnn, num_nodes=2048, hidden_nf=33, device='cuda:0'):
         super(CrossAttentionPoseRegression, self).__init__()
@@ -693,11 +710,19 @@ class CrossAttentionPoseRegression(nn.Module):
         t = torch.zeros(B, 3, device=x_src.device)
 
         for b in range(B):  # Process each batch
-            valid_src_points = org_x_src[b][valid_mask[b]]
-            valid_tgt_points = org_x_tgt[b][valid_mask[b]]
-            valid_src_features = org_x_src[b][valid_mask[b]]
-            valid_tgt_features = org_x_tgt[b][valid_mask[b]]
+            # valid_src_points = torch.where(valid_mask[b].unsqueeze(-1), org_x_src[b], torch.zeros_like(org_x_src[b]))
+            # valid_tgt_points = torch.where(valid_mask[b].unsqueeze(-1), org_x_tgt[b], torch.zeros_like(org_x_tgt[b]))
+            # valid_src_features = torch.where(valid_mask[b].unsqueeze(-1), org_h_src[b], torch.zeros_like(org_h_src[b]))
+            # valid_tgt_features = torch.where(valid_mask[b].unsqueeze(-1), org_h_tar[b], torch.zeros_like(org_h_tar[b]))
+            valid_src_points = org_x_src[b]
+            valid_tgt_points = org_x_tgt[b]
+            valid_src_features = org_h_src
+            valid_tgt_features = org_h_tar
 
+
+            print("$$$$$$$$$$$$$")
+            print(valid_mask.shape)
+            print(valid_src_points.shape)
             if valid_src_points.shape[0] == 0:  # Skip empty batches
                 R[b] = torch.eye(3, device=x_src.device)
                 t[b] = torch.zeros(3, device=x_src.device)
@@ -752,7 +777,11 @@ class CrossAttentionPoseRegression(nn.Module):
             if torch.isnan(weights).any() or torch.isinf(weights).any():
                 print(f"NaN/Inf in weights for batch {b}: {weights}")
             
+            print("!!!!!!!!!!!!!!!!!!!!")
+            print(weights.shape)
+            # print(valid_src_points.shape)
             weights = weights / (weights.sum() + 1e-6)  # Fix division instability
+
 
             src_centroid = (weights[:, None] * valid_src_points).sum(dim=0, keepdim=True)
             tgt_centroid = (weights[:, None] * valid_tgt_points).sum(dim=0, keepdim=True)
@@ -1287,8 +1316,7 @@ def get_args():
     parser.add_argument('--n_layers', type=int, default=3, help='Number of layers in EGNN')
     parser.add_argument('--mode', type=str, default="train", choices=["train", "val"], help='Mode to run the model (train/val)')
     parser.add_argument('--lossBeta', type=float, default=1e-2, help='Correspondence loss weights')
-    parser.add_argument('--savepath', type=str, default='./checkpoints/checkpoint-3dmatch.pth', help='Path to the dataset')
-
+    parser.add_argument('--savepath', type=str, default='./checkpoints/sim-egnn-loss-2025-01-26-checkpoints/model_epoch_1.pth', help='Path to the dataset')
     return parser.parse_args()
 
 if __name__ == "__main__":

@@ -437,7 +437,7 @@ class KITTItest(data.Dataset):
         # Load data from .pkl file
         with open(os.path.join(self.root, 'test_kitti', file_name), 'rb') as f:
             # data = pickle.load(f)
-            data = np.load(f)
+            data = np.load(f, allow_pickle  = True)
 
         # Extract data
         # Assuming `data` is loaded from the .pkl file
@@ -448,6 +448,7 @@ class KITTItest(data.Dataset):
         # corr = data.get('corr').squeeze(0).numpy()  # Shape: (N, 2)
         # labels = data.get('gt_labels').squeeze(0).numpy()  # Shape: (N,)
         # gt_trans = data.get('gt_pose').squeeze(0).numpy()  # Shape: (4, 4)
+
         src_pts = data.get('xyz_0')  # Shape: (N, 3)
         tar_pts = data.get('xyz_1')  # Shape: (N, 3)
         if self.descriptor == 'fcgf':
@@ -469,7 +470,9 @@ class KITTItest(data.Dataset):
         N_tgt = len(tar_pts)
         # Count the number of ones
         # num_ones = np.count_nonzero(labels == 1)
-
+        print("!!!!    $$$$    !!!!!!!!!!!!!!!")
+        print(N_src)
+        print(N_tgt)
                 
         # Sort the points by ray length to sensor origin for ordering
         sensor_origin = np.array([0, 0, 0])
@@ -501,7 +504,11 @@ class KITTItest(data.Dataset):
 
         valid_src_points = src_pts[valid_mask]  # (N_valid, 3)
         # Use the second column of corr to get corresponding target indices
+
         sampled_tgt_indices = corr[:, 1].astype(int)  # Get target indices
+        # Replace any index in sampled_tgt_indices that is larger than N_src with the last valid index of N_src
+        # sampled_tgt_indices[sampled_tgt_indices >= N_src] = N_src - 1
+
         sampled_tgt_points = tar_pts[sampled_tgt_indices]  # Get corresponding target points
         sampled_tgt_features = tgt_features[sampled_tgt_indices]
         valid_src_features = src_features[valid_mask]  # (N_valid, D)

@@ -1117,7 +1117,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer, use_poi
         print(ssim_loss_mean)
         print(point_error_mean)
         # Combine the normalized losses if needed
-        total_loss = corr_loss_mean #  + ssim_loss_mean
+        total_loss = corr_loss_mean + rot_loss_mean + trans_loss_mean #  + ssim_loss_mean
 
         # Combine pose and correspondence losses
         loss = total_loss #+ beta * corr_loss

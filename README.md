@@ -32,7 +32,7 @@ $conda activate egnn-test
 1. To run this project, you'll need to download the following raw data for next step processing:
 
 - [3DMatch](https://drive.google.com/file/d/1b8yA9AqJ0iBTfn9dhrK84JLG3CMGQRF3/view)
-- [KITTI](https://drive.google.com/file/d/17u2AWfPIMbgCQUVtXYelgacv_Cyeh6EM/view?usp=sharing)
+- [KITTI](https://drive.google.com/file/d/160htMU6rIOqGJIehqam9p5xBnWd-ri2g/view?usp=sharing)
 
 2. After uncompression, you should have seen 'fragments', 'gt_results', under root dir of the data folder,
 

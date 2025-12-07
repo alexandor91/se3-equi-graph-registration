@@ -38,7 +38,7 @@ $conda activate egnn-test
 
 3. As the FCGF feature descriptor processed results link is not valid anymore from PointDSC, we have to process it manually to extract feature descriptors. You can either use link above or download 3DMatch raw fragments from the official website [3DMatch](https://3dmatch.cs.princeton.edu/), (PointDSC outdated), uncompress '7-Scenes.zip', then use `datasets/cal_overlap.py` from [D3Feat](https://github.com/XuyangBai/D3Feat?tab=readme-ov-file#refs) to process the downloaded data, which selects all the point cloud fragment pairs having more than 30% overlap, to filter out some low overlap pairs. and copy it into the same data folder level as 'fragments'. To run the processing script, 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
 4. run [ResUNetBN2C](https://node1.chrischoy.org/data/publications/fcgf/2019-08-19_06-17-41.pth) from [FCGF](https://github.com/chrischoy/FCGF)， choose the first pre-trained weights with settings, 'normalized feature, 3DMatch,	2.5cm (0.025)	32' to extract FCGF feature descriptors and save the results.
-5. Copy `3DMatch_Feature.py` from the `data_preprocess` folder into the data root dir, run `data_preprocess` folder to process. After running, all data pairs are saved in each pkl file, so the feature correspondence pairs are established
+5. Copy `3DMatch_Feature.py` from the `data_preprocess` folder into the data root dir, and run the `3DMatch_Feature.py` script to process. After running, all data pairs are saved in each pkl file, so the feature correspondence pairs are established
 
 6. Use 'split_dataset_train_val' from 'datasets' folder to split train, val, and create test filelist txt files, put txt at the level of  pkl data folder (not inside folder with pkl!). change data [ath in training code.
 
@@ -47,10 +47,10 @@ $conda activate egnn-test
 For the training dataset processing, we provide scripts in the `data_preprocess` folder:
 
 - `3DMatch_Feature.py`: For processing 3DMatch data, configure the directory based on the command in the function
-- `process_kitti.py`: For processing KITTI dataset, configure the directory based on the command in the function
+- `process_kitti.py`: For processing the KITTI dataset, configure the directory based on the command in the function
 
 ## Custom Data Processing
-For self-processing data, please check the scripts in 'data_preprocess' folder for each individual training data processing:
+For self-processing data, please check the scripts in the 'data_preprocess' folder for each individual training data processing:
 If you own dataset is an ordered sequence of point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $ i$th and $ i+1$th frame, respectively.
 - `process_kitti.py`: For processing a sequential dataset.<br> 
 

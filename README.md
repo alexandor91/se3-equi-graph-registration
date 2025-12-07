@@ -29,18 +29,18 @@ $conda activate egnn-test
 
 ## Raw Data download
 
-1. To run this project, you'll need to download the following raw data for next step processing:
+1. To run this project, you'll need to download the following raw data for the next step processing:
 
 - [3DMatch](https://drive.google.com/file/d/1b8yA9AqJ0iBTfn9dhrK84JLG3CMGQRF3/view)
 - [KITTI](https://drive.google.com/file/d/160htMU6rIOqGJIehqam9p5xBnWd-ri2g/view?usp=sharing)
 
-2. After uncompression, you should have seen 'fragments', 'gt_results', under root dir of the data folder,
+2. After uncompression, you should have seen 'fragments', 'gt_results', under the root dir of the data folder,
 
-3. Download 3DMatch raw fragments from the [PointDSC](http://node2.chrischoy.org/data/datasets/registration/threedmatch.tgz) repository, uncompress 'threedmatch.tgz', and copy it into the same data folder level with 'fragments'. To run processing script 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
+3. Download 3DMatch raw fragments from the official website [3DMatch](https://3dmatch.cs.princeton.edu/), (PointDSC outdated), uncompress '7-Scenes.zip', then use `datasets/cal_overlap.py` to process the downloaded data, which selects all the point cloud fragment pairs having more than 30% overlap, to filter out some low overlap pairs. and copy it into the same data folder level as 'fragments'. To run the processing script, 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
 
-4. Copy `3DMatch_Feature.py` from `data_preprocess` folder into the data root dir, run '`data_preprocess` folder' to process, after run, all data pairs are saved in each pkl file
+4. Copy `3DMatch_Feature.py` from the `data_preprocess` folder into the data root dir, run `data_preprocess` folder to process. After running, all data pairs are saved in each pkl file
 
-5. Use 'split_dataset_train_val' from 'datasets' folder to split train, val, and create test filelist txt files, put txt at level of  pkl data folder (not inside folder with pkl!). change data [ath in training code.
+5. Use 'split_dataset_train_val' from 'datasets' folder to split train, val, and create test filelist txt files, put txt at the level of  pkl data folder (not inside folder with pkl!). change data [ath in training code.
 
 ## Data Processing for pair pkl files
  

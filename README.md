@@ -36,7 +36,7 @@ $conda activate egnn-test
 
 2. After uncompression, you should have seen 'fragments', 'gt_results', under the root dir of the data folder,
 
-3. Download 3DMatch raw fragments from the official website [3DMatch](https://3dmatch.cs.princeton.edu/), (PointDSC outdated), uncompress '7-Scenes.zip', then use `datasets/cal_overlap.py` to process the downloaded data, which selects all the point cloud fragment pairs having more than 30% overlap, to filter out some low overlap pairs. and copy it into the same data folder level as 'fragments'. To run the processing script, 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
+3. Download 3DMatch raw fragments from the official website [3DMatch](https://3dmatch.cs.princeton.edu/), (PointDSC outdated), uncompress '7-Scenes.zip', then use `datasets/cal_overlap.py` from [D3Feat](https://github.com/XuyangBai/D3Feat?tab=readme-ov-file#refs) to process the downloaded data, which selects all the point cloud fragment pairs having more than 30% overlap, to filter out some low overlap pairs. and copy it into the same data folder level as 'fragments'. To run the processing script, 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
 
 4. Copy `3DMatch_Feature.py` from the `data_preprocess` folder into the data root dir, run `data_preprocess` folder to process. After running, all data pairs are saved in each pkl file
 
@@ -46,15 +46,15 @@ $conda activate egnn-test
  
 For the training dataset processing, we provide scripts in the `data_preprocess` folder:
 
-- `3DMatch_Feature.py`: For processing 3DMatch data, configure the directory based on the commend in the function
-- `process_kitti.py`: For processing KITTI dataset, configure the directory based on the commend in the function
+- `3DMatch_Feature.py`: For processing 3DMatch data, configure the directory based on the command in the function
+- `process_kitti.py`: For processing KITTI dataset, configure the directory based on the command in the function
 
 ## Custom Data Processing
 For self-processing data, please check the scripts in 'data_preprocess' folder for each individual training data processing:
-If you own dataset is ordered sequence point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $i$ th and $i+1$ th frame respectively.
-- `process_kitti.py`: For processing sequential dataset.<br> 
+If you own dataset is an ordered sequence of point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $ i$th and $ i+1$th frame, respectively.
+- `process_kitti.py`: For processing a sequential dataset.<br> 
 
-For processing KITTI dataset. Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
+For processing the KITTI dataset. Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
 
 - `3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%. We use too conditions to determined the gt correspondence from source to target points, the transformed source point position distance to the target point is smaller than a threshold along with the point feature descriptors dot product similairty bigger than a threshold, label as one, otherwise, we only use point neighbouring search to find the match point pair, label as zero, 
 

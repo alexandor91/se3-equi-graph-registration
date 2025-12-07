@@ -16,13 +16,13 @@ Below is an overview of our EGNN model architecture:
 
 ## Environment Setup
 The code is tested on **pyg (Pytorch-Geometric)** **2.4.0**, **python 3.8**, **Pytorch 2.0.0**, **cuda11.8**, **GPU RAM** at least 8GB with batch size 1 on **GTX 2080** above.
-Noted, my current code implementation with batch size one only consumes less than **0.9GB** RAM for 2048 points on GPU!!! and the batch size by default is set to one, other than one  may result in some training error, I will fix the batch size bug soon, please stay tuned, and batch size one can be enough for the current training as data size is not that big. The code can be ported onto edge device easily to support mobile applications.
+Noted, my current code implementation with batch size one only consumes less than **0.9GB** RAM for 2048 points on GPU!!! And the batch size by default is set to one, other than one  may result in some training error. I will fix the batch size bug soon. Please stay tuned, and a batch size of one can be enough for the current training, as the  data size is not that big. The code can be ported to an edge device easily to support mobile applications.
 
 To set up the environment for this project, we use Conda. Follow these steps:
 
 1. Make sure you have Conda installed. If not, you can download it from [here](https://docs.conda.io/en/latest/miniconda.html).
 
-2. Clone this repository, All required packages are specified in the `environment.yml` file. 
+2. Clone this repository. All required packages are specified in the `environment.yml` file. 
 
 $conda env create -f environment.yml
 $conda activate egnn-test
@@ -37,7 +37,7 @@ $conda activate egnn-test
 2. After uncompression, you should have seen 'fragments', 'gt_results', under the root dir of the data folder,
 
 3. As the FCGF feature descriptor processed results link is not valid anymore from PointDSC, we have to process it manually to extract feature descriptors. You can either use link above or download 3DMatch raw fragments from the official website [3DMatch](https://3dmatch.cs.princeton.edu/), (PointDSC outdated), uncompress '7-Scenes.zip', then use `datasets/cal_overlap.py` from [D3Feat](https://github.com/XuyangBai/D3Feat?tab=readme-ov-file#refs) to process the downloaded data, which selects all the point cloud fragment pairs having more than 30% overlap, to filter out some low overlap pairs. and copy it into the same data folder level as 'fragments'. To run the processing script, 'fragments' +  'gt_results' + 'threedmatch' are mandatory.
-4. run [ResUNetBN2C](https://node1.chrischoy.org/data/publications/fcgf/2019-08-19_06-17-41.pth) from [FCGF](https://github.com/chrischoy/FCGF)， choose the first pre-trained weights with settings, 'normalized feature, 3DMatch,	2.5cm (0.025)	32' to extract FCGF feature descriptors and save the point feature descriptor results in '.npz' files, put it into 'threedmatch' folder
+4. run [ResUNetBN2C](https://node1.chrischoy.org/data/publications/fcgf/2019-08-19_06-17-41.pth) from [FCGF](https://github.com/chrischoy/FCGF)， choose the first pre-trained weights with settings, 'normalized feature, 3DMatch,	2.5cm (0.025)	32' to extract FCGF feature descriptors and save the point feature descriptor results in '.npz' files, put it into 'fragments/{scene-id}/' folder
 5. Copy `3DMatch_Feature.py` from the `data_preprocess` folder into the data root dir, and run the `3DMatch_Feature.py` script to process. After running, all data pairs are saved in each pkl file, so the feature correspondence pairs are established
 
 6. Use 'split_dataset_train_val' from 'datasets' folder to split train, val, and create test filelist txt files, put txt at the level of  pkl data folder (not inside folder with pkl!). change data [ath in training code.
@@ -50,13 +50,13 @@ For the training dataset processing, we provide scripts in the `data_preprocess`
 - `process_kitti.py`: For processing the KITTI dataset, configure the directory based on the command in the function
 
 ## Custom Data Processing
-For self-processing data, please check the scripts in the 'data_preprocess' folder for each individual training data processing:
-If you own dataset is an ordered sequence of point cloud frames, just reuse the same KITTI processing script to process the sequentail point cloud frames, So the source and target scans are using $ i$th and $ i+1$th frame, respectively.
+For self-processing data, please check the scripts in the 'data_preprocess' folder for each training data processing:
+If your own dataset is an ordered sequence of point cloud frames, just reuse the same KITTI processing script to process the sequential point cloud frames, so the source and target scans are using the $ i$th and $ i+1$th frame, respectively.
 - `process_kitti.py`: For processing a sequential dataset.<br> 
 
 For processing the KITTI dataset. Otherwise, if your point cloud frames are unordered, please refer to the 3D Match script to process, yet you have to establish the correspondence between source and target point scans, with a minimum 30% point overlapping between source and target scans, otherwise, we refer you to use public library like Open3D, PCL (Point Cloud Library), scikit-learn, through KDTree or Octree to create source and target frame correspondence with engouh point overlappings. Original 3DMatch already processed it for use. For further scan pair match, you can refer to the PointDSC repository to process the feature descriptors, [FPFH](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fpfh.py), [FCGF](https://github.com/XuyangBai/PointDSC/blob/master/misc/cal_fcgf.py), as most of our data preprocessing codes are adapted based on their codes. 
 
-- `3DMatch_Feature.py`: For processing paired scan dataset with enough overlapping > 30%. We use too conditions to determined the gt correspondence from source to target points, the transformed source point position distance to the target point is smaller than a threshold along with the point feature descriptors dot product similairty bigger than a threshold, label as one, otherwise, we only use point neighbouring search to find the match point pair, label as zero, 
+- `3DMatch_Feature.py`: For processing a paired scan dataset with enough overlapping > 30%. We use two conditions to determine the GT correspondence from source to target points. The transformed source point position distance to the target point is smaller than a threshold, along with the point feature descriptors dot product similarity bigger than a threshold, label as one; otherwise, we only use point neighbouring search to find the match point pair, label as zero. 
 
 ## Training
 
